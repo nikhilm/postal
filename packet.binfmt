@@ -1,0 +1,33 @@
+#lang binfmt
+dhcp = 
+op   htype  hlen  hops
+     xid
+secs         flags
+    ciaddr
+    yiaddr
+    siaddr
+    giaddr
+    chaddr
+    sname
+    file
+    options;
+
+op = u8;
+htype = u8;
+hlen = u8;
+hops = u8;
+xid = u32be;
+secs = u16be;
+flags = u16be;
+
+ciaddr = ipaddr;
+yiaddr = ipaddr;
+siaddr = ipaddr;
+giaddr = ipaddr;
+ipaddr = u32be;
+
+chaddr = u8{16};
+sname = u8{64};
+file = u8{128};
+
+options = u8*;
