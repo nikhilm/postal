@@ -1,10 +1,10 @@
 #lang scribble/manual
-@require[@for-label[dhcp
+@require[@for-label[postal
                     racket/base]]
 
-@title{dhcp}
+@title{postal}
 @author{nikhil}
 
-@defmodule[dhcp]
+@defmodule[postal]
 
 Package Description Here
