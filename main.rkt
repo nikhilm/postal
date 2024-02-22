@@ -1,6 +1,5 @@
 #lang racket/base
 
-(require "packet.binfmt")
 (require "client.rkt")
 
 ;; Notice
