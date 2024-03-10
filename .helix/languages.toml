@@ -1,0 +1,9 @@
+[[language]]
+name = "racket"
+language-servers = [ "racket-langserver" ]
+
+[language-server.racket-langserver]
+command = "racket"
+args = ["-l", "racket-langserver"]
+config = { provideFormatter = true }
+environment = { "DISPLAY" = ":0" }
