@@ -28,6 +28,7 @@
 (define (make-dhcp-client)
   (dhcp-client 'init))
 
+; TODO
 #|the DHCPREQUEST message MUST use the same
      value in the DHCP message header's 'secs' field and be sent to the
      same IP broadcast address as the original DHCPDISCOVER message.|#

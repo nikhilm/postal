@@ -2,16 +2,37 @@
 
 (require racket/port)
 (require binaryio)
+(require racket/contract)
 
-(provide make-dhcpdiscover)
+(struct message
+  (xid ; int
+  ciaddr ; int
+  yiaddr ; int
+  siaddr ; int
+  giaddr ; int
+  ))
 
-(define (make-dhcpdiscover)
+; TODO: Move out of this module.
+(define (get-interface-mac-addr)
+  ; chaddr
+  ; currently the mac address for this computer's wifi
+  ; 70:cd:0d:a0:4d:d5
+  ; this is 6 bytes, with another 10 bytes of padding.
+  ; written as straight byte at a time, no endianness
+  ;#"\x70\xcd\x0d\xa0\x4d\xd5\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+  #"\xf6\x52\x8d\x05\xc0\x45\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+
+(define (write-int-addr addr)
+  (write-integer addr 4 #f))
+
+(define/contract (encode msg)
+  (message? . -> . bytes?)
   (with-output-to-bytes
     (lambda ()
       ; bootp op
       ; BOOTREQUEST
+      ; TODO: Pick based on DHCP message type.
       (write-byte 1)
-
       ; htype - 10mb ethernet. i see no reason to use another.
       (write-byte 1)
 
@@ -23,33 +44,28 @@
 
       ; xid
       ; TODO: Pick sequential random numbers
-      (write-integer (random 4294967087) 4 #f)
+      (write-integer (message-xid msg) 4 #f)
 
       ; secs
-      ; TODO: Better
-      (write-integer 5 2 #f)
+      (write-integer 0 2 #f)
 
-      ; flags should be set to 1
-      (write-integer 1 2 #f)
+      ; flags should set the most significant bit to 1 to request broadcast.
+      (write-integer #x8000 2 #f)
 
       ; ciaddr
-      (write-integer 0 4 #f)
+      (write-int-addr (message-ciaddr msg))
 
       ; yiaddr
-      (write-integer 0 4 #f)
+      (write-int-addr (message-yiaddr msg))
 
       ; siaddr
-      (write-integer 0 4 #f)
+      (write-int-addr (message-siaddr msg))
 
       ; giaddr
-      (write-integer 0 4 #f)
+      (write-int-addr (message-giaddr msg))
 
       ; chaddr
-      ; currently the mac address for this computer's wifi
-      ; 70:cd:0d:a0:4d:d5
-      ; this is 6 bytes, with another 10 bytes of padding.
-      ; written as straight byte at a time, no endianness
-      (write-bytes #"\x70\xcd\x0d\xa0\x4d\xd5\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+      (write-bytes (get-interface-mac-addr))
 
       ; sname
       (write-bytes (make-bytes 64))
@@ -65,12 +81,16 @@
 
       ; dhcp message type
       (write-bytes (bytes 53 1 1))
+      (write-bytes (bytes 255)))))
 
-      ; TODO: dhclient writes hostname, consider doing that.
+(provide make-dhcpdiscover encode)
 
-      ; end option. not sure if this is required.
-      (write-byte 255))))
+(define (make-dhcpdiscover xid)
+  (message xid 0 0 0 0))
 
+(module+ test
+; TODO: Request claude to generate a fuzzer for the parsers
+)
 #|
 sketch is that we want to feed data to the parser, and all down the parse stream, it should
 yield back if it gets a meaningful packet or not. based on taht we want to keep feeding it more stuff
