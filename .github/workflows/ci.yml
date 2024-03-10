@@ -21,9 +21,9 @@ jobs:
           distribution: full
           variant: ${{ matrix.racket-variant }}
           version: ${{ matrix.racket-version }}
-      - name: Installing dhcp and its dependencies
-        run: raco pkg install --no-docs --auto --name dhcp
-      - name: Compiling dhcp and building its docs
-        run: raco setup --check-pkg-deps --unused-pkg-deps dhcp
-      - name: Testing dhcp
-        run: raco test -x -p dhcp
+      - name: Installing postal and its dependencies
+        run: raco pkg install --no-docs --auto --name postal
+      - name: Compiling postal and building its docs
+        run: raco setup --check-pkg-deps --unused-pkg-deps postal
+      - name: Testing postal
+        run: raco test -x -p postal
