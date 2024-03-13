@@ -113,6 +113,15 @@
       (write-bytes (bytes 53 1 (dhcp-type->int (message-type msg))))
       (write-bytes (bytes 255)))))
 
+(define (read-vendor-extension)
+  (match (read-byte)
+    [0 (values 'pad #f)]
+    [255 (values 'end #f)]
+    ; TODO: Handle receiving less than n bytes.
+    ; seems like that should be an error.
+    [tag (let ([n (read-byte)])
+           (values tag (read-bytes n)))]))
+
 (define/contract (parse buf)
   (bytes? . -> . message?)
   (with-input-from-bytes buf
@@ -143,11 +152,18 @@
       (define chaddr (read-bytes 16))
       (define sname (read-bytes 64))
       (define file (read-bytes 128))
+      ; magic
       (match (read-bytes 4)
         [#"c\202Sc" void])
-      ; TODO: Loop over potentially a multitude
-      ; of options and assign them to things.
-      (message 'fake xid secs ciaddr yiaddr siaddr giaddr))))
+      (define msg-type
+        (for/first ([(tag value) (in-producer read-vendor-extension)]
+                    #:break (eq? tag 'end)
+                    #:when (eq? tag 53))
+          value))
+      (if msg-type
+          (message (int->dhcp-type (bytes->integer msg-type #f))
+                   xid secs ciaddr yiaddr siaddr giaddr)
+          (error 'parse "No dhcp message type found")))))
 
 (provide make-dhcpdiscover
          encode

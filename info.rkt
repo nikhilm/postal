@@ -8,5 +8,6 @@
 (define pkg-authors '(racket-packages@me.nikhilism.com))
 (define license 'MIT)
 
-(define test-command-line-arguments
-'())
+; TBD
+;(define test-command-line-arguments
+; '(("")))

@@ -25,9 +25,13 @@ sleep 1
 # Run DHCP client in namespace
 # TODO: Clean up path
 # ip netns exec dhcp-test-client ip addr add 192.168.1.2/24 dev veth1
+# TODO: If we cna express each test as running
+# as a separate IP or something, then we may
+# not need to spin up dnsmasq every time.
 ip netns exec dhcp-test-client ip link set veth1 up
 ip netns exec dhcp-test-client ip route add default dev veth1
 # ip netns exec dhcp-test-client /bin/bash
+# there is flakiness sometimes and this won't get packets.
 /home/nikhil/racket-8.12/bin/racket -A /home/nikhil/.local/share/racket/ main.rkt
 
 # Clean up
