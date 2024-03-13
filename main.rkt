@@ -67,4 +67,4 @@
   ; lol wrong macaddr
   (define resp (make-bytes 65536))
   (define-values (n src src-port) (udp-receive! sock resp))
-  (printf "UDP RESPONSE from ~a:~a: ~a~n" src src-port (subbytes resp 0 n)))
+  (printf "UDP RESPONSE from ~a:~a: ~a~n" src src-port (parse (subbytes resp 0 n))))

@@ -1,16 +1,21 @@
 #lang racket/base
 
+(require racket/match)
 (require racket/port)
+; TODO: If we are only using write-integer and read-integer, we can inline their suggested
+; definition from the doc and remove this dependency.
 (require binaryio)
 (require racket/contract)
 
 (struct message
-  (xid ; int
-  ciaddr ; int
-  yiaddr ; int
-  siaddr ; int
-  giaddr ; int
-  ))
+  (type ; symbol
+   xid ; int
+   secs ; int
+   ciaddr ; int
+   yiaddr ; int
+   siaddr ; int
+   giaddr ; int
+   ) #:transparent)
 
 ; TODO: Move out of this module.
 (define (get-interface-mac-addr)
@@ -22,8 +27,33 @@
   ;#"\x70\xcd\x0d\xa0\x4d\xd5\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
   #"\xf6\x52\x8d\x05\xc0\x45\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
 
+(define (dhcp-type->int type)
+  (match type
+    ['discover 1]
+    ['offer 2]
+    ['request 3]
+    ['decline 4]
+    ['ack 5]
+    ['nak 6]
+    ['release 7]
+    ['inform 8]))
+
+(define (int->dhcp-type n)
+  (match n
+    [1 'discover]
+    [2 'offer]
+    [3 'request]
+    [4 'decline]
+    [5 'ack]
+    [6 'nak]
+    [7 'release]
+    [8 'inform]))
+
 (define (write-int-addr addr)
   (write-integer addr 4 #f))
+
+(define (read-int-addr)
+  (read-integer 4 #f))
 
 (define/contract (encode msg)
   (message? . -> . bytes?)
@@ -80,17 +110,55 @@
       (write-bytes (bytes 99 130 83 99))
 
       ; dhcp message type
-      (write-bytes (bytes 53 1 1))
+      (write-bytes (bytes 53 1 (dhcp-type->int (message-type msg))))
       (write-bytes (bytes 255)))))
 
-(provide make-dhcpdiscover encode)
+(define/contract (parse buf)
+  (bytes? . -> . message?)
+  (with-input-from-bytes buf
+    (lambda ()
+      ; bootp message type to discard
+      ; TODO: Perhaps validate against the dhcp type
+      (read-byte)
+
+      ; htype, don't care
+      (read-byte)
+
+      ; hlen, don't care right now
+      ; TODO: pass on server mac
+      (read-byte)
+
+      ; hops - don't care
+      (read-byte)
+
+      (define xid (read-integer 4 #f))
+      (define secs (read-integer 2 #f))
+      ;flags
+      (read-integer 2 #f)
+      ; ciaddr
+      (define ciaddr (read-int-addr))
+      (define yiaddr (read-int-addr))
+      (define siaddr (read-int-addr))
+      (define giaddr (read-int-addr))
+      (define chaddr (read-bytes 16))
+      (define sname (read-bytes 64))
+      (define file (read-bytes 128))
+      (match (read-bytes 4)
+        [#"c\202Sc" void])
+      ; TODO: Loop over potentially a multitude
+      ; of options and assign them to things.
+      (message 'fake xid secs ciaddr yiaddr siaddr giaddr))))
+
+(provide make-dhcpdiscover
+         encode
+         parse)
 
 (define (make-dhcpdiscover xid)
-  (message xid 0 0 0 0))
+  (message 'discover xid 0 0 0 0 0))
 
 (module+ test
-; TODO: Request claude to generate a fuzzer for the parsers
-)
+  ; TODO: Request claude to generate a fuzzer for the parsers
+  )
 #|
 sketch is that we want to feed data to the parser, and all down the parse stream, it should
 yield back if it gets a meaningful packet or not. based on taht we want to keep feeding it more stuff
