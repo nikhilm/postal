@@ -1,5 +1,6 @@
 #lang racket/base
 
+(require racket/match)
 (require racket/udp)
 (require "message.rkt")
 
@@ -22,6 +23,19 @@
 ; and then make a decision.
 ; should open _one_ UDP socket on port 68 and start a thread for reading.
 
+(define (make-recv-thread sock ch)
+  ; note that with an unbuffered channel
+  ; we are relying on the caller reading messages
+  ; from this thread fast enough that we aren't dropping
+  ; udp messages due to full kernel buffers.
+  ; TODO: a way to shut this thread down.
+  (thread
+   (lambda ()
+     ; TODO: This is not a loop right now.
+     (define resp (make-bytes 65536))
+     (define-values (n src src-port) (udp-receive! sock resp))
+     (channel-put ch (list (parse (subbytes resp 0 n)) src src-port)))))
+
 (struct dhcp-client
   (state))
 
@@ -33,15 +47,31 @@
      value in the DHCP message header's 'secs' field and be sent to the
      same IP broadcast address as the original DHCPDISCOVER message.|#
 
+(define (send-discover sock)
+; TODO: xid
+  (udp-send-to sock "255.255.255.255" 67 (encode (make-dhcpdiscover 456))))
+
 (define (run _client)
   ; TODO: Handle break to potentially shutdown cleanly (i.e. give up lease)
   ;(let loop ())
 
   ; TODO: Decide whether to start in 'init or 'init-reboot
+  ; TODO: The protocol assumes packets are reliably delivered.
+  ; Should SELECTING fall back to INIT if no packets arrive
+  ; for example, with some cap on retries.
   (define sock (udp-open-socket))
   (udp-bind! sock #f 68 #t)
-  (udp-send-to sock "255.255.255.255" 67 (make-dhcpdiscover)))
 
+  (define ch (make-channel))
+  (define recv-thread (make-recv-thread sock ch))
+  (let loop ([current-state 'init])
+    (match current-state
+      ['init (send-discover sock) (loop 'selecting)]
+      ['selecting
+       ; TODO: Sync on multiple channels and timer
+       (match-define (list msg src src-port) (channel-get ch))
+       (printf "UDP RESPONSE from ~a:~a: ~a~n" src src-port msg)
+       ])))
 ; handle timeouts and retries for things like waiting for DHCPACK/NACK
 
 #|
@@ -61,9 +91,7 @@ OK, few things to sort out with the design
 11. Eventually perform ARP scan, although this may require raw sockets
 |#
 
-; for easier rapid iteration.
-; but probably needs sudo.
-; would be nice to set up a user namespace + corresponding dhcp server within which to practice.
-(module+ main
-  (define client (make-dhcp-client))
-  (run client))
+(module+ test
+  ; will need to somehow mock sends and responses as well.
+  )
+

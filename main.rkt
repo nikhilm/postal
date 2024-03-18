@@ -1,6 +1,7 @@
 #lang racket/base
 
 (require "message.rkt")
+(require "client.rkt")
 
 ;; Notice
 ;; To install (from within the package directory):
@@ -31,7 +32,6 @@
 
 (module+ main
   (require racket/cmdline)
-  (require racket/udp)
   #|(define who (box "world"))
   (command-line
    #:program "my-program"
@@ -59,12 +59,5 @@
   ; tcpreplay may allow replaying actual packets.
   ; however what I mean is, even when reading dnsmasq responses from the network, separate the packet reading
   ; so we can force the state machine to tick at our own pace.
-
-  (define sock (udp-open-socket))
-  (udp-bind! sock #f 68 #t)
-  (udp-send-to sock "255.255.255.255" 67 (encode (make-dhcpdiscover 456)))
-  ; ok, dhcpoffer is being sent by dnsmasq, but we aren't receiving it somehow.
-  ; lol wrong macaddr
-  (define resp (make-bytes 65536))
-  (define-values (n src src-port) (udp-receive! sock resp))
-  (printf "UDP RESPONSE from ~a:~a: ~a~n" src src-port (parse (subbytes resp 0 n))))
+  (define client (make-dhcp-client))
+  (run client))
