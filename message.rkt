@@ -167,7 +167,8 @@
 
 (provide make-dhcpdiscover
          encode
-         parse)
+         parse
+         (struct-out message))
 
 (define (make-dhcpdiscover xid)
   (message 'discover xid 0 0 0 0 0))

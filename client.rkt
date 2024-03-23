@@ -3,6 +3,7 @@
 (require racket/match)
 (require racket/udp)
 (require "message.rkt")
+(require "state-machine.rkt")
 
 (provide make-dhcp-client
          run)
@@ -48,7 +49,7 @@
      same IP broadcast address as the original DHCPDISCOVER message.|#
 
 (define (send-discover sock)
-; TODO: xid
+  ; TODO: xid
   (udp-send-to sock "255.255.255.255" 67 (encode (make-dhcpdiscover 456))))
 
 (define (run _client)
@@ -64,14 +65,12 @@
 
   (define ch (make-channel))
   (define recv-thread (make-recv-thread sock ch))
-  (let loop ([current-state 'init])
-    (match current-state
-      ['init (send-discover sock) (loop 'selecting)]
-      ['selecting
-       ; TODO: Sync on multiple channels and timer
-       (match-define (list msg src src-port) (channel-get ch))
-       (printf "UDP RESPONSE from ~a:~a: ~a~n" src src-port msg)
-       ])))
+  (define sm (make-state-machine))
+  (let loop ([evts (list)])
+  ; TODO: Will actally look something like
+    ;(sync evts)
+    ; the initial thing will have nothing to pass to the input
+    ()))
 ; handle timeouts and retries for things like waiting for DHCPACK/NACK
 
 #|
@@ -91,7 +90,5 @@ OK, few things to sort out with the design
 11. Eventually perform ARP scan, although this may require raw sockets
 |#
 
-(module+ test
-  ; will need to somehow mock sends and responses as well.
-  )
+
 
