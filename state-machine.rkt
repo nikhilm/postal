@@ -1,10 +1,11 @@
 #lang racket/base
 
+(require racket/list)
 (require racket/match)
 (require racket/generator)
 (require "message.rkt")
 
-(provide tick)
+(provide update-state)
 
 ; should thesejust be Racket evt events?
 ; we can't discriminate on them?
@@ -17,47 +18,35 @@
 (struct state ())
 (struct init-state state ())
 (struct selecting-state state (offers timeout))
+(struct requesting-state ())
 
-(define (tick state [event #f])
-  (match state
-    ['init (values 'selecting (make-dhcpdiscover 34))]))
+(struct sm (current))
+
+(define (make-state-machine [start (init-state)])
+  (sm start))
 
 ; TODO: Accept configuration like mac address, xid, starting local time and so on.
-(define (make-state-machine [start (init-state)])
-  (generator ()
-             (let loop ([current-state start])
-               (match current-state
-                 ; TODO: How to structure these? Not all yields will then change state.
-                 [(init-state) (yield (list (send-msg (make-dhcpdiscover 34) 'broadcast)))
-				;; the other weird part is, this yield is going to get the next incoming packet + time
-				; which may already then want to advance the state of the loop (i.e. if we don't get any new packets, but do timeout)
-				; however this code is currently going to switch to selecting state _after_ the generator resumes, not before.
-				; so actually we may want to yield as the first step of entering a new state, and not the last step of the previous one?
-				; if we want to put an instant in the future into the selecting state
-				; we need a way to get the current instant
-				; on every iteration
-                               (loop (selecting-state null 10))]
+(define (update-state machine now incoming)
+  ; TODO: contract
+  (match (sm-current machine)
+    [(init-state) (values
+                   (sm (selecting-state null (+ 10 now)))
+                   (list (send-msg (make-dhcpdiscover 34) 'broadcast)))]
 
-                 [(selecting-state offers timeout)
-                  ; accept either offers or a timeout
-                  ; now here is the weird part of the yield
-                  ; which is, it doesn't give anything back
-                  ; how to handle that on the caller?
-				  ; what if we always yield a list of events?
-                  ;
-                  (match (yield null)
-                    [(and (struct message _) offer)
-                     (loop
-                      (selecting-state
-                       (cons offer (selecting-state-offers current-state))
-                       (selecting-state-timeout current-state)))]
-                    ; todo: do we use time instants or elapsed?
-                    ; probably instants
-                    [(time-instant now)
-                     ; TODO: Adjust time, capped to zero.
-                     (if (>= now (selecting-state-timeout current-state))
-                         (error "TODO select an offer")
-                         (loop current-state))])]))))
+    [(selecting-state offers timeout)
+     (if (>= now timeout)
+         ; TODO: Pick the best offer from offers
+         ; TODO: Handle no offers
+         (values
+          (sm (requesting-state))
+          (list "should-be-dhcprequest"))
+
+         (values
+          (sm (selecting-state (for ([msg (in-list incoming)])
+                                 ; TODO: Validate that the incoming packet is a offer
+                                 msg) timeout))
+          null))]))
+
 
 (module+ test
   (require rackunit)
@@ -67,7 +56,7 @@
    "Starting in init leads to a request to send DHCPDISCOVER"
    (define sm (make-state-machine))
    ; no input required
-   (define next-event (sm))
+   (match-define-values (_ (list next-event)) (update-state sm 0 null))
    (check-match next-event
                 (send-msg message to)
                 (equal? (message-type message) 'discover)))
@@ -76,20 +65,12 @@
   ; while getting the machine to that state.
   (test-case
    "When in selecting, offers are considered for 10 seconds"
-   (define sm (make-state-machine))
-   ; no input required
-   (sm)
-
-   ; ok, how to model time and this offer stuff
-   ; something like
-
-   ; TODO: This is a made up packet that is not correct
-   (sm (message 'offer 72 0 0 0 0 0))
-   ; may end up being a "just call me back in some time"
-   ; i think the problem with this generator based API is
-   ; every iteration may not have something to send in, nor
-   ; produce something useful. the send and receive are decoupled.
-   (define next-event (sm 'timeout))
-   (check-match next-event
-                (send-msg message to)
-                (equal? (message-type message) 'request))))
+   ; can we use the threading module to simplify the nested lets?
+   (let*-values ([(sm) (make-state-machine)]
+                 [(sm _) (update-state sm 7 null)]
+                 ; TODO: This is a made up packet that is not correct
+                 [(sm _) (update-state sm 8 (list (message 'offer 72 0 0 0 0 0)))]
+				[(sm outputs) (update-state sm 18 (list (message 'offer 72 0 0 0 0 0)))])
+     (check-match (first outputs)
+                  (send-msg message to)
+                  (equal? (message-type message) 'request)))))
