@@ -7,7 +7,6 @@
 
 (provide update-state)
 
-; should thesejust be Racket evt events?
 ; we can't discriminate on them?
 ; we probably want to have a port that can take messages
 ; if we do want to sync on that.
@@ -48,21 +47,28 @@
          (values
           (update-xid machine (requesting-state))
           ; TODO: Set options requested IP and server identifier
-          (list (send-msg (message
-                           'request
-                           (sm-xid machine)
-                           ; secs, should be the same as discover
-                           0
-                           0
-                           0
-                           0
-                           0) 'broadcast)))
+          (list (send-msg (request-from-offer
+                           (sm-xid machine) (first offers)) 'broadcast)))
 
          (values
-          (update-xid machine (selecting-state (for ([msg (in-list incoming)])
+          (update-xid machine (selecting-state (for/list ([msg (in-list incoming)])
                                                  ; TODO: Validate that the incoming packet is a offer
                                                  msg) timeout))
           null))]))
+
+(define (request-from-offer xid offer)
+  (with-options (message
+                 'request
+                 xid
+                 ; secs, should be the same as discover
+                 0
+                 0
+                 0
+                 0
+                 0
+                 null)
+    ; TODO: Add server identifier option. For that we need to know the senders' IP and we are't storing
+    (list (message-option 50 (message-yiaddr offer)))))
 
 
 (module+ test
@@ -86,8 +92,8 @@
    (let*-values ([(machine) (make-state-machine)]
                  [(machine _) (update-state machine 7 null)]
                  ; TODO: This is a made up packet that is not correct
-                 [(machine _) (update-state machine 8 (list (message 'offer 72 0 0 0 0 0)))]
-                 [(machine outputs) (update-state machine 18 (list (message 'offer 72 0 0 0 0 0)))])
+                 [(machine _) (update-state machine 8 (list (message 'offer 72 0 0 0 0 0 null)))]
+                 [(machine outputs) (update-state machine 18 (list (message 'offer 72 0 0 0 0 0 null)))])
      (check-match (first outputs)
                   (send-msg message to)
                   (and (equal? (message-type message) 'request)

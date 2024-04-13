@@ -7,6 +7,17 @@
 (require binaryio)
 (require racket/contract)
 
+(struct message-option (tag value))
+
+(define (write-addr-option tag value)
+  (write-byte tag)
+  (write-byte 4)
+  (write-int-addr value))
+
+(define/match (write-option option)
+  [((message-option 50 value)) (write-addr-option 50 value)]
+  [((message-option 54 value)) (write-addr-option 54 value)])
+
 (struct message
   (type ; symbol
    xid ; int
@@ -15,6 +26,7 @@
    yiaddr ; int
    siaddr ; int
    giaddr ; int
+   options ; list
    ) #:transparent)
 
 ; TODO: Move out of this module.
@@ -111,6 +123,9 @@
 
       ; dhcp message type
       (write-bytes (bytes 53 1 (dhcp-type->int (message-type msg))))
+
+      (for ([option (in-list (message-options msg))])
+        (write-option option))
       (write-bytes (bytes 255)))))
 
 (define (read-vendor-extension)
@@ -162,16 +177,21 @@
           value))
       (if msg-type
           (message (int->dhcp-type (bytes->integer msg-type #f))
-                   xid secs ciaddr yiaddr siaddr giaddr)
+                   xid secs ciaddr yiaddr siaddr giaddr null)
           (error 'parse "No dhcp message type found")))))
 
 (provide make-dhcpdiscover
          encode
          parse
-         (struct-out message))
+         (struct-out message)
+         (struct-out message-option)
+         with-options)
+
+(define (with-options msg options)
+  (struct-copy message msg [options options]))
 
 (define (make-dhcpdiscover xid)
-  (message 'discover xid 0 0 0 0 0))
+  (message 'discover xid 0 0 0 0 0 null))
 
 
 (module+ test
