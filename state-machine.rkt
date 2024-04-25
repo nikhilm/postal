@@ -2,17 +2,19 @@
 
 (require racket/list)
 (require racket/match)
-(require racket/generator)
 (require "message.rkt")
 
-(provide update-state)
+(provide update-state make-state-machine)
 
 ; we can't discriminate on them?
 ; we probably want to have a port that can take messages
 ; if we do want to sync on that.
 
-(struct send-msg (msg to))
-(struct time-instant (instant))
+; outgoing event structs
+(struct send-msg (msg to) #:transparent)
+
+; incoming event structs
+(struct incoming (hostname msg))
 
 (struct state ())
 (struct init-state state ())
@@ -20,6 +22,11 @@
 (struct requesting-state ())
 
 (struct sm (current xid))
+
+; OK. problems to solve:
+; 1. the state machine needs to know the sender of the message too
+; 2. the states are having to juggle a lot of fields?
+; 3. can we at least make it more readable?
 
 ; TODO: Stash the xid somewhere.
 ; this is the sort of thing that would be nice to not have to carry around everywhere
@@ -51,30 +58,43 @@
                            (sm-xid machine) (first offers)) 'broadcast)))
 
          (values
-          (update-xid machine (selecting-state (for/list ([msg (in-list incoming)])
+          (update-xid machine (selecting-state (for/list ([ic (in-list incoming)])
                                                  ; TODO: Validate that the incoming packet is a offer
-                                                 msg) timeout))
+                                                 ic) timeout))
           null))]))
 
 (define (request-from-offer xid offer)
-  (with-options (message
-                 'request
-                 xid
-                 ; secs, should be the same as discover
-                 0
-                 0
-                 0
-                 0
-                 0
-                 null)
-    ; TODO: Add server identifier option. For that we need to know the senders' IP and we are't storing
-    (list (message-option 50 (message-yiaddr offer)))))
+  (match-let ([(struct incoming (hostname msg)) offer])
+    (with-options (message
+                   'request
+                   xid
+                   ; secs, should be the same as discover
+                   0
+                   0
+                   0
+                   0
+                   0
+                   null)
+      (list (message-option 50 (message-yiaddr msg))
+            (message-option 54 hostname)))))
 
 
 (module+ test
   (require rackunit)
-  ; will need to somehow mock sends and responses as well.
-  ;also need to be able to test outgoing packets
+  (require net/ip)
+
+  (define (canonical-server-ip)
+    (make-ip-address "192.168.11.1"))
+
+  (define (extract-option msg tag)
+    (findf
+     (lambda (opt)
+       (equal? (message-option-tag opt) tag))
+     (message-options msg)))
+
+  (define (wrap-message msg [sender (canonical-server-ip)])
+    (incoming (ip-address->number sender) msg))
+
   (test-case
    "Starting in init leads to a request to send DHCPDISCOVER"
    (define s (make-state-machine))
@@ -82,7 +102,8 @@
    (match-define-values (_ (list next-event)) (update-state s 0 null))
    (check-match next-event
                 (send-msg message to)
-                (equal? (message-type message) 'discover)))
+                (and (equal? (message-type message) 'discover)
+                     (equal? to 'broadcast))))
 
   ; will need to figure out how to test intermediate states
   ; while getting the machine to that state.
@@ -92,9 +113,16 @@
    (let*-values ([(machine) (make-state-machine)]
                  [(machine _) (update-state machine 7 null)]
                  ; TODO: This is a made up packet that is not correct
-                 [(machine _) (update-state machine 8 (list (message 'offer 72 0 0 0 0 0 null)))]
-                 [(machine outputs) (update-state machine 18 (list (message 'offer 72 0 0 0 0 0 null)))])
+                 [(machine _) (update-state machine 8
+                                            (list
+                                             (wrap-message (message 'offer 72 0 0 0 0 0 null))))]
+                 [(_ outputs) (update-state machine 18
+                                            (list
+                                             (wrap-message (message 'offer 72 0 0 0 0 0 null))))])
+     ; probably should use some check form that prints each substep diff
      (check-match (first outputs)
                   (send-msg message to)
                   (and (equal? (message-type message) 'request)
-                       #t)))))
+                       (equal? to 'broadcast)
+                       (equal? (message-option-value (extract-option message 54))
+                               (ip-address->number (canonical-server-ip))))))))

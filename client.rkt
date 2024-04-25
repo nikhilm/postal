@@ -33,6 +33,7 @@
   (thread
    (lambda ()
      ; TODO: This is not a loop right now.
+     ; TODO: Share this buffer across iterations.
      (define resp (make-bytes 65536))
      (define-values (n src src-port) (udp-receive! sock resp))
      (channel-put ch (list (parse (subbytes resp 0 n)) src src-port)))))

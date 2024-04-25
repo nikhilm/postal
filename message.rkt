@@ -7,7 +7,7 @@
 (require binaryio)
 (require racket/contract)
 
-(struct message-option (tag value))
+(struct message-option (tag value) #:transparent)
 
 (define (write-addr-option tag value)
   (write-byte tag)
