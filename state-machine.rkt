@@ -2,9 +2,10 @@
 
 (require racket/list)
 (require racket/match)
+(require net/ip)
 (require "message.rkt")
 
-(provide update-state make-state-machine)
+(provide update-state make-state-machine send-msg incoming update)
 
 ; we can't discriminate on them?
 ; we probably want to have a port that can take messages
@@ -14,7 +15,8 @@
 (struct send-msg (msg to) #:transparent)
 
 ; incoming event structs
-(struct incoming (hostname msg))
+(struct incoming (hostname msg) #:transparent)
+(struct update (sm next-timeout-instant outgoing) #:transparent)
 
 (struct state ())
 (struct init-state state ())
@@ -39,11 +41,16 @@
     (sm state (if (> new-xid 4294967295) 0 new-xid))))
 
 ; TODO: Accept configuration like mac address, xid, starting local time and so on.
+; TODO: Consider making incoming just a single message, since state can change based on a single message.
+; unlike OOP 2 functions for stuff (one to send in new data, one to receive events)
+; i think we may be able to get away with just one, as long as we pass around some stuff internally.
+; -> update
 (define (update-state machine now incoming)
   ; TODO: contract
   (match (sm-current machine)
-    [(init-state) (values
-                   (update-xid machine (selecting-state null (+ 10 now)))
+    [(init-state) (update
+                   (update-xid machine (selecting-state null (+ 10000 now)))
+                   (+ 10000 now)
                    (list (send-msg (make-dhcpdiscover (sm-xid machine)) 'broadcast)))]
 
     ; TODO: Response xid validation.
@@ -51,16 +58,20 @@
      (if (>= now timeout)
          ; TODO: Pick the best offer from offers
          ; TODO: Handle no offers - client has to retry with some timeout
-         (values
+         (update
           (update-xid machine (requesting-state))
+          ; if the server does not respond within this time, we need to do more stuff
+          ; TODO: Handle this case
+          (+ 50000 now)
           ; TODO: Set options requested IP and server identifier
           (list (send-msg (request-from-offer
                            (sm-xid machine) (first offers)) 'broadcast)))
 
-         (values
+         (update
           (update-xid machine (selecting-state (for/list ([ic (in-list incoming)])
                                                  ; TODO: Validate that the incoming packet is a offer
                                                  ic) timeout))
+          timeout
           null))]))
 
 (define (request-from-offer xid offer)
@@ -76,7 +87,7 @@
                    0
                    null)
       (list (message-option 50 (message-yiaddr msg))
-            (message-option 54 hostname)))))
+            (message-option 54 (ip-address->number (make-ip-address hostname)))))))
 
 
 (module+ test
@@ -99,7 +110,7 @@
    "Starting in init leads to a request to send DHCPDISCOVER"
    (define s (make-state-machine))
    ; no input required
-   (match-define-values (_ (list next-event)) (update-state s 0 null))
+   (match-define (update _ _ (list next-event)) (update-state s 0 null))
    (check-match next-event
                 (send-msg message to)
                 (and (equal? (message-type message) 'discover)
@@ -110,15 +121,15 @@
   (test-case
    "When in selecting, offers are considered for 10 seconds"
    ; can we use the threading module to simplify the nested lets?
-   (let*-values ([(machine) (make-state-machine)]
-                 [(machine _) (update-state machine 7 null)]
-                 ; TODO: This is a made up packet that is not correct
-                 [(machine _) (update-state machine 8
-                                            (list
-                                             (wrap-message (message 'offer 72 0 0 0 0 0 null))))]
-                 [(_ outputs) (update-state machine 18
-                                            (list
-                                             (wrap-message (message 'offer 72 0 0 0 0 0 null))))])
+   (match-let* ([machine (make-state-machine)]
+                [(update machine _ _) (update-state machine 7 null)]
+                ; TODO: This is a made up packet that is not correct
+                [(update machine _ _) (update-state machine 8000
+                                                    (list
+                                                     (wrap-message (message 'offer 72 0 0 0 0 0 null))))]
+                [(update _ _ outputs) (update-state machine 11000
+                                                    (list
+                                                     (wrap-message (message 'offer 72 0 0 0 0 0 null))))])
      ; probably should use some check form that prints each substep diff
      (check-match (first outputs)
                   (send-msg message to)
