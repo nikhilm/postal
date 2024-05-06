@@ -13,12 +13,12 @@ ip link set veth0 netns dhcp-test-server
 ip link set veth1 netns dhcp-test-client
 
 # Configure namespace
-ip netns exec dhcp-test-server ip addr add 192.168.1.1/24 dev veth0
-ip netns exec dhcp-test-server ip link set veth0 up
+ip netns exec dhcp-test-server ip addr add 172.16.1.1/24 dev veth0
+ip netns exec dhcp-test-server ip link set dev veth0 up
 # TODO: Figure out how to kill these
 # tail /var/log/syslog to see these messages.
 # Can also always launch wireshark within the network namespace.
-ip netns exec dhcp-test-server dnsmasq --dhcp-range=192.168.1.100,192.168.1.200 --interface=veth0 --dhcp-leasefile=/dev/null --log-queries=extra --log-debug
+ip netns exec dhcp-test-server dnsmasq --dhcp-range=172.16.1.100,172.16.1.200 --interface=veth0 --dhcp-leasefile=/dev/null --log-queries=extra --log-debug
 
 sleep 1
 
@@ -28,11 +28,10 @@ sleep 1
 # TODO: If we cna express each test as running
 # as a separate IP or something, then we may
 # not need to spin up dnsmasq every time.
-ip netns exec dhcp-test-client ip link set veth1 up
+ip netns exec dhcp-test-client ip link set dev veth1 up
 ip netns exec dhcp-test-client ip route add default dev veth1
 # ip netns exec dhcp-test-client /bin/bash
-# there is flakiness sometimes and this won't get packets.
-/home/nikhil/racket-8.12/bin/racket -A /home/nikhil/.local/share/racket/ main.rkt
+ip netns exec dhcp-test-client /home/nikhil/racket-8.12/bin/racket -A /home/nikhil/.local/share/racket/ main.rkt
 
 # Clean up
 ip netns delete dhcp-test-server 2>/dev/null || true
