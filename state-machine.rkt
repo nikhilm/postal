@@ -5,7 +5,7 @@
 (require net/ip)
 (require "message.rkt")
 
-(provide update-state make-state-machine send-msg incoming update)
+(provide step make-state-machine send-msg incoming update)
 
 ; we can't discriminate on them?
 ; we probably want to have a port that can take messages
@@ -25,54 +25,55 @@
 
 (struct sm (current xid))
 
-; OK. problems to solve:
-; 1. the state machine needs to know the sender of the message too
-; 2. the states are having to juggle a lot of fields?
-; 3. can we at least make it more readable?
-
-; TODO: Stash the xid somewhere.
 ; this is the sort of thing that would be nice to not have to carry around everywhere
 ; TODO: Randomize xid
 (define (make-state-machine [start (init-state)] [xid 0])
   (sm start xid))
 
-(define (update-xid s state)
+(define/match (bump-update-xid upd)
+  [((update sm tm out)) (update (update-xid sm) tm out)])
+
+(define (update-xid s)
   (let ([new-xid (add1 (sm-xid s))])
-    (sm state (if (> new-xid 4294967295) 0 new-xid))))
+    (struct-copy sm s [xid (if (> new-xid 4294967295) 0 new-xid)])))
+
+(define (update-state s new-state)
+  (struct-copy sm s [current new-state]))
 
 ; TODO: Accept configuration like mac address, xid, starting local time and so on.
 ; TODO: Consider making incoming just a single message, since state can change based on a single message.
 ; unlike OOP 2 functions for stuff (one to send in new data, one to receive events)
 ; i think we may be able to get away with just one, as long as we pass around some stuff internally.
 ; -> update
-(define (update-state machine now incoming)
-  ; TODO: contract
-  (match (sm-current machine)
-    [(init-state) (update
-                   (update-xid machine (selecting-state null (+ 10000 now)))
-                   (+ 10000 now)
-                   (list (send-msg (make-dhcpdiscover (sm-xid machine)) 'broadcast)))]
+(define (step machine now incoming)
+  (bump-update-xid
+   ; TODO: contract
+   (match (sm-current machine)
+     [(init-state) (update
+                    (update-state machine (selecting-state null (+ 10000 now)))
+                    (+ 10000 now)
+                    (list (send-msg (make-dhcpdiscover (sm-xid machine)) 'broadcast)))]
 
-    ; TODO: Response xid validation.
-    [(selecting-state offers timeout)
-     (if (>= now timeout)
-         ; TODO: Pick the best offer from offers
-         ; TODO: Handle no offers - client has to retry with some timeout
-         (update
-          (update-xid machine (requesting-state))
-          ; if the server does not respond within this time, we need to do more stuff
-          ; TODO: Handle this case
-          (+ 50000 now)
-          ; TODO: Set options requested IP and server identifier
-          (list (send-msg (request-from-offer
-                           (sm-xid machine) (first offers)) 'broadcast)))
+     ; TODO: Response xid validation.
+     [(selecting-state offers timeout)
+      (if (>= now timeout)
+          ; TODO: Pick the best offer from offers
+          ; TODO: Handle no offers - client has to retry with some timeout
+          (update
+           (update-state machine (requesting-state))
+           ; if the server does not respond within this time, we need to do more stuff
+           ; TODO: Handle this case
+           (+ 50000 now)
+           ; TODO: Set options requested IP and server identifier
+           (list (send-msg (request-from-offer
+                            (sm-xid machine) (first offers)) 'broadcast)))
 
-         (update
-          (update-xid machine (selecting-state (for/list ([ic (in-list incoming)])
-                                                 ; TODO: Validate that the incoming packet is a offer
-                                                 ic) timeout))
-          timeout
-          null))]))
+          (update
+           (update-state machine (selecting-state (for/list ([ic (in-list incoming)])
+                                                    ; TODO: Validate that the incoming packet is a offer
+                                                    ic) timeout))
+           timeout
+           null))])))
 
 (define (request-from-offer xid offer)
   (match-let ([(struct incoming (hostname msg)) offer])
@@ -104,13 +105,13 @@
      (message-options msg)))
 
   (define (wrap-message msg [sender (canonical-server-ip)])
-    (incoming (ip-address->number sender) msg))
+    (incoming (ip-address->string sender) msg))
 
   (test-case
    "Starting in init leads to a request to send DHCPDISCOVER"
    (define s (make-state-machine))
    ; no input required
-   (match-define (update _ _ (list next-event)) (update-state s 0 null))
+   (match-define (update _ _ (list next-event)) (step s 0 null))
    (check-match next-event
                 (send-msg message to)
                 (and (equal? (message-type message) 'discover)
@@ -120,20 +121,16 @@
   ; while getting the machine to that state.
   (test-case
    "When in selecting, offers are considered for 10 seconds"
-   ; can we use the threading module to simplify the nested lets?
-   (match-let* ([machine (make-state-machine)]
-                [(update machine _ _) (update-state machine 7 null)]
-                ; TODO: This is a made up packet that is not correct
-                [(update machine _ _) (update-state machine 8000
-                                                    (list
-                                                     (wrap-message (message 'offer 72 0 0 0 0 0 null))))]
-                [(update _ _ outputs) (update-state machine 11000
-                                                    (list
-                                                     (wrap-message (message 'offer 72 0 0 0 0 0 null))))])
-     ; probably should use some check form that prints each substep diff
-     (check-match (first outputs)
-                  (send-msg message to)
-                  (and (equal? (message-type message) 'request)
-                       (equal? to 'broadcast)
-                       (equal? (message-option-value (extract-option message 54))
-                               (ip-address->number (canonical-server-ip))))))))
+   (define stepped
+     (for/fold ([upd (update (make-state-machine) 0 null)])
+               ([args (list '(7 ())
+                            `(8000 (,(wrap-message (message 'offer 72 0 0 0 0 0 null))))
+                            '(11000 ()))])
+       (apply step (update-sm upd) args)))
+   ; probably should use some check form that prints each substep diff
+   (check-match (first (update-outgoing stepped))
+                (send-msg message to)
+                (and (equal? (message-type message) 'request)
+                     (equal? to 'broadcast)
+                     (equal? (message-option-value (extract-option message 54))
+                             (ip-address->number (canonical-server-ip)))))))
