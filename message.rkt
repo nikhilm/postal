@@ -128,10 +128,17 @@
         (write-option option))
       (write-bytes (bytes 255)))))
 
+(define (read-len-prefixed-time)
+  (unless (eq? 4 (read-byte))
+    (error "Expected time-like option to be exactly 4 bytes"))
+  (read-integer 4 #f))
+
 (define (read-vendor-extension)
   (match (read-byte)
     [0 (values 'pad #f)]
     [255 (values 'end #f)]
+    [58 (values 'renewal-time (read-len-prefixed-time))]
+    [59 (values 'rebinding-time (read-len-prefixed-time))]
     ; TODO: Handle receiving less than n bytes.
     ; seems like that should be an error.
     [tag (let ([n (read-byte)])
@@ -175,9 +182,14 @@
                     #:break (eq? tag 'end)
                     #:when (eq? tag 53))
           value))
+      (define options
+        (for/list ([(tag value) (in-producer read-vendor-extension)]
+                   #:break (eq? tag 'end))
+          (message-option tag value)))
+      ; TODO: Is it valid for a message to have data beyond the last option?
       (if msg-type
           (message (int->dhcp-type (bytes->integer msg-type #f))
-                   xid secs ciaddr yiaddr siaddr giaddr null)
+                   xid secs ciaddr yiaddr siaddr giaddr options)
           (error 'parse "No dhcp message type found")))))
 
 (provide make-dhcpdiscover
@@ -185,10 +197,13 @@
          parse
          (struct-out message)
          (struct-out message-option)
-         with-options)
+         optionsf)
 
-(define (with-options msg options)
-  (struct-copy message msg [options options]))
+; findf for message options
+; returns the value or #f
+(define (optionsf msg tag)
+  (let ([opt (findf (lambda (opt) (eq? (message-option-tag opt) tag)) (message-options msg))])
+    (and opt (message-option-value opt))))
 
 (define (make-dhcpdiscover xid)
   (message 'discover xid 0 0 0 0 0 null))

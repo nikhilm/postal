@@ -115,5 +115,8 @@ OK, few things to sort out with the design
 11. Eventually perform ARP scan, although this may require raw sockets
 |#
 
-
+(module+ test
+  (require rackunit)
+  (test-case "Malformed incoming messages are discarded"
+             (fail "TODO: Implement me")))
 

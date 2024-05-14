@@ -18,13 +18,13 @@
 (struct incoming (hostname msg) #:transparent)
 (struct update (sm next-timeout-instant outgoing) #:transparent)
 
-(struct state ())
-(struct init-state state ())
-(struct selecting-state state (offers timeout))
-(struct requesting-state (chosen timeout))
-(struct bound-state ())
+(struct state () #:transparent)
+(struct init-state state () #:transparent)
+(struct selecting-state state (offers timeout) #:transparent)
+(struct requesting-state (chosen timeout when) #:transparent)
+(struct bound-state (renew rebind) #:transparent)
 
-(struct sm (current xid))
+(struct sm (current xid) #:transparent)
 
 ; this is the sort of thing that would be nice to not have to carry around everywhere
 ; TODO: Randomize xid
@@ -40,7 +40,10 @@
 
 (define/match (update-machine machine req)
   ; TODO: Probably a more succinct way to write this.
-  [((sm _ xid) (up-req new-state timeout outgoing)) (update (sm new-state (next-xid xid)) timeout outgoing)])
+  ; Only bump the xid if there are outgoing messages
+  [((sm _ xid) (up-req new-state timeout outgoing)) (define nxid (if (null? outgoing) xid (next-xid xid)))
+                                                    (update (sm new-state nxid)
+                                                            timeout outgoing)])
 
 ; TODO: Accept configuration like mac address, xid, starting local time and so on.
 ; TODO: Consider making incoming just a single message, since state can change based on a single message.
@@ -63,11 +66,14 @@
          ; TODO: Handle no offers - client has to retry with some timeout
          (up-req
           ; TODO: Jitter the timeout
-          (requesting-state (first offers) (+ 10000 now))
+          ; It is quite possible for the client to not send out the request offer "right away" relative to `now`
+          ; but it seems pretty unlikely in practice.
+          (requesting-state (first offers) (+ 10000 now) now)
           ; if the server does not respond within this time, we need to do more stuff
           ; TODO: Handle this case
           (+ 10000 now)
           ; TODO: Set options requested IP and server identifier
+          ; TODO: Propagate the current now via requesting to bound, since t1 and t2 are calculated from there
           (list (send-msg (request-from-offer
                            ; TODO: Save the xid in the requesting-state so that the ack can be matched
                            (sm-xid machine) (first offers)) 'broadcast)))
@@ -79,7 +85,7 @@
           timeout
           null))]
 
-    [(requesting-state chosen timeout)
+    [(requesting-state chosen timeout when)
      (if (>= now timeout)
          (error 'step "TODO: Handle not receiving ack")
 
@@ -87,8 +93,21 @@
            ; TODO: Handle other messages
            ; TODO: Match with chosen
            [(list (incoming src msg))
-            ; check every 5s for timeouts and so on
-            (up-req (bound-state) (+ 5000 now) null)]))]))
+            (let ([maybe-renew (optionsf msg 'renewal-time)]
+                  [maybe-rebind (optionsf msg 'rebinding-time)])
+              (if (and maybe-renew maybe-rebind)
+                  (up-req (bound-state (+ when (seconds->milliseconds maybe-renew))
+                                       (+ when (seconds->milliseconds maybe-rebind)))
+                          (+ 5000 now)
+                          null)
+                  (error "TODO: Handle malformed message by going back to init or something")))]))]
+
+    [(and orig-state (bound-state renew-instant rebind-instant))
+     (cond
+       [(>= now renew-instant) (error "TODO: Enter renewing")]
+       [(>= now rebind-instant) (error "TODO: Handle rebinding")]
+       ; TODO: Wish there was a way to say "nothing changed"
+       [else (up-req orig-state (+ 5000 now) null)])]))
 
 (define (step machine now incomings)
   (update-machine
@@ -97,19 +116,19 @@
 
 (define (request-from-offer xid offer)
   (match-let ([(struct incoming (hostname msg)) offer])
-    (with-options (message
-                   'request
-                   xid
-                   ; TODO: secs, should be the same as discover
-                   0
-                   0
-                   0
-                   0
-                   0
-                   null)
-      (list (message-option 50 (message-yiaddr msg))
-            (message-option 54 (ip-address->number (make-ip-address hostname)))))))
+    (message 'request
+             xid
+             ; TODO: secs, should be the same as discover
+             0
+             0
+             0
+             0
+             0
+             (list (message-option 50 (message-yiaddr msg))
+                   (message-option 54 (ip-address->number (make-ip-address hostname)))))))
 
+(define (seconds->milliseconds sec)
+  (* 1000 sec))
 
 (module+ test
   (require rackunit)
