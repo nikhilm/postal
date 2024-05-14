@@ -21,7 +21,8 @@
 (struct state ())
 (struct init-state state ())
 (struct selecting-state state (offers timeout))
-(struct requesting-state ())
+(struct requesting-state (chosen timeout))
+(struct bound-state ())
 
 (struct sm (current xid))
 
@@ -45,11 +46,12 @@
 ; unlike OOP 2 functions for stuff (one to send in new data, one to receive events)
 ; i think we may be able to get away with just one, as long as we pass around some stuff internally.
 ; -> update
-(define (step machine now incoming)
+(define (step machine now incomings)
   (bump-update-xid
    ; TODO: contract
    (match (sm-current machine)
      [(init-state) (update
+                    ; TODO: Jitter the timeout
                     (update-state machine (selecting-state null (+ 10000 now)))
                     (+ 10000 now)
                     (list (send-msg (make-dhcpdiscover (sm-xid machine)) 'broadcast)))]
@@ -60,20 +62,31 @@
           ; TODO: Pick the best offer from offers
           ; TODO: Handle no offers - client has to retry with some timeout
           (update
-           (update-state machine (requesting-state))
+           ; TODO: Jitter the timeout
+           (update-state machine (requesting-state (first offers) (+ 10000 now)))
            ; if the server does not respond within this time, we need to do more stuff
            ; TODO: Handle this case
-           (+ 50000 now)
+           (+ 10000 now)
            ; TODO: Set options requested IP and server identifier
            (list (send-msg (request-from-offer
                             (sm-xid machine) (first offers)) 'broadcast)))
 
           (update
-           (update-state machine (selecting-state (for/list ([ic (in-list incoming)])
+           (update-state machine (selecting-state (for/list ([ic (in-list incomings)])
                                                     ; TODO: Validate that the incoming packet is a offer
                                                     ic) timeout))
            timeout
-           null))])))
+           null))]
+
+     [(requesting-state chosen timeout)
+      (if (>= now timeout)
+          (error 'step "TODO: Handle not receiving ack")
+
+          (match incomings
+            ; TODO: Handle other messages
+            [(list (incoming src msg))
+             ; check every 5s for timeouts and so on
+             (update (update-state machine (bound-state)) (+ 5000 now) null)]))])))
 
 (define (request-from-offer xid offer)
   (match-let ([(struct incoming (hostname msg)) offer])
