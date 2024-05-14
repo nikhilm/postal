@@ -31,69 +31,76 @@
 (define (make-state-machine [start (init-state)] [xid 0])
   (sm start xid))
 
-(define/match (bump-update-xid upd)
-  [((update sm tm out)) (update (update-xid sm) tm out)])
 
-(define (update-xid s)
-  (let ([new-xid (add1 (sm-xid s))])
-    (struct-copy sm s [xid (if (> new-xid 4294967295) 0 new-xid)])))
+(define (next-xid xid)
+  (let ([new-xid (add1 xid)])
+    (if (> new-xid 4294967295) 0 new-xid)))
 
-(define (update-state s new-state)
-  (struct-copy sm s [current new-state]))
+(struct up-req (new-state timeout outgoing) #:transparent)
+
+(define/match (update-machine machine req)
+  ; TODO: Probably a more succinct way to write this.
+  [((sm _ xid) (up-req new-state timeout outgoing)) (update (sm new-state (next-xid xid)) timeout outgoing)])
 
 ; TODO: Accept configuration like mac address, xid, starting local time and so on.
 ; TODO: Consider making incoming just a single message, since state can change based on a single message.
 ; unlike OOP 2 functions for stuff (one to send in new data, one to receive events)
 ; i think we may be able to get away with just one, as long as we pass around some stuff internally.
 ; -> update
+(define (step-internal machine now incomings)
+  ; TODO: contract
+  (match (sm-current machine)
+    [(init-state) (up-req
+                   ; TODO: Jitter the timeout
+                   (selecting-state null (+ 10000 now))
+                   (+ 10000 now)
+                   (list (send-msg (make-dhcpdiscover (sm-xid machine)) 'broadcast)))]
+
+    ; TODO: Response xid validation.
+    [(selecting-state offers timeout)
+     (if (>= now timeout)
+         ; TODO: Pick the best offer from offers
+         ; TODO: Handle no offers - client has to retry with some timeout
+         (up-req
+          ; TODO: Jitter the timeout
+          (requesting-state (first offers) (+ 10000 now))
+          ; if the server does not respond within this time, we need to do more stuff
+          ; TODO: Handle this case
+          (+ 10000 now)
+          ; TODO: Set options requested IP and server identifier
+          (list (send-msg (request-from-offer
+                           ; TODO: Save the xid in the requesting-state so that the ack can be matched
+                           (sm-xid machine) (first offers)) 'broadcast)))
+
+         (up-req
+          (selecting-state (for/list ([ic (in-list incomings)])
+                             ; TODO: Validate that the incoming packet is a offer
+                             ic) timeout)
+          timeout
+          null))]
+
+    [(requesting-state chosen timeout)
+     (if (>= now timeout)
+         (error 'step "TODO: Handle not receiving ack")
+
+         (match incomings
+           ; TODO: Handle other messages
+           ; TODO: Match with chosen
+           [(list (incoming src msg))
+            ; check every 5s for timeouts and so on
+            (up-req (bound-state) (+ 5000 now) null)]))]))
+
 (define (step machine now incomings)
-  (bump-update-xid
-   ; TODO: contract
-   (match (sm-current machine)
-     [(init-state) (update
-                    ; TODO: Jitter the timeout
-                    (update-state machine (selecting-state null (+ 10000 now)))
-                    (+ 10000 now)
-                    (list (send-msg (make-dhcpdiscover (sm-xid machine)) 'broadcast)))]
-
-     ; TODO: Response xid validation.
-     [(selecting-state offers timeout)
-      (if (>= now timeout)
-          ; TODO: Pick the best offer from offers
-          ; TODO: Handle no offers - client has to retry with some timeout
-          (update
-           ; TODO: Jitter the timeout
-           (update-state machine (requesting-state (first offers) (+ 10000 now)))
-           ; if the server does not respond within this time, we need to do more stuff
-           ; TODO: Handle this case
-           (+ 10000 now)
-           ; TODO: Set options requested IP and server identifier
-           (list (send-msg (request-from-offer
-                            (sm-xid machine) (first offers)) 'broadcast)))
-
-          (update
-           (update-state machine (selecting-state (for/list ([ic (in-list incomings)])
-                                                    ; TODO: Validate that the incoming packet is a offer
-                                                    ic) timeout))
-           timeout
-           null))]
-
-     [(requesting-state chosen timeout)
-      (if (>= now timeout)
-          (error 'step "TODO: Handle not receiving ack")
-
-          (match incomings
-            ; TODO: Handle other messages
-            [(list (incoming src msg))
-             ; check every 5s for timeouts and so on
-             (update (update-state machine (bound-state)) (+ 5000 now) null)]))])))
+  (update-machine
+   machine
+   (step-internal machine now incomings)))
 
 (define (request-from-offer xid offer)
   (match-let ([(struct incoming (hostname msg)) offer])
     (with-options (message
                    'request
                    xid
-                   ; secs, should be the same as discover
+                   ; TODO: secs, should be the same as discover
                    0
                    0
                    0
@@ -146,4 +153,8 @@
                 (and (equal? (message-type message) 'request)
                      (equal? to 'broadcast)
                      (equal? (message-option-value (extract-option message 54))
-                             (ip-address->number (canonical-server-ip)))))))
+                             (ip-address->number (canonical-server-ip))))))
+
+  (test-case
+   "Handle transition to bound"
+   (fail "TODO transition to bound")))
