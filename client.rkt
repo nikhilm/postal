@@ -33,12 +33,13 @@
   ; TODO: a way to shut this thread down.
   (thread
    (lambda ()
-     ; TODO: This is not a loop right now.
-     ; TODO: Share this buffer across iterations.
      (define resp (make-bytes 65536))
-     (define-values (n src _) (udp-receive! sock resp))
-     (eprintf "GOT INCOMING UDP MESSAGE~n")
-     (channel-put ch (incoming src (parse (subbytes resp 0 n)))))))
+     (let loop ()
+       (define-values (n src _) (udp-receive! sock resp))
+       (define msg (parse (subbytes resp 0 n)))
+       (eprintf "GOT INCOMING UDP MESSAGE ~v from ~v~n" msg src)
+       (channel-put ch (incoming src msg))
+       (loop)))))
 
 ; this struct does not have any state right now, but will likely need config options and stuff eventually.
 (struct dhcp-client ())
