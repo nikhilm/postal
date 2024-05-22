@@ -1,11 +1,13 @@
 #lang racket/base
 
+(require racket/contract)
 (require racket/match)
 (require racket/port)
+(require racket/pretty)
 ; TODO: If we are only using write-integer and read-integer, we can inline their suggested
 ; definition from the doc and remove this dependency.
 (require binaryio)
-(require racket/contract)
+(require net/ip)
 
 (struct message-option (tag value) #:transparent)
 
@@ -133,10 +135,28 @@
     (error "Expected time-like option to be exactly 4 bytes"))
   (read-integer 4 #f))
 
+(define (read-len-prefixed-addr)
+  (unless (eq? 4 (read-byte))
+    (error "Expected addr-like option to be exactly 4 bytes"))
+  (make-ip-address (read-bytes 4)))
+
+(define (read-addr-list)
+  (let ([len (read-byte)])
+    (unless (= 0 (remainder len 4))
+      (error "Expected a multiple of 4 for the length, but got ~v" len))
+    (for/list ([_ (in-range 0 (quotient len 4))])
+      (make-ip-address (read-bytes 4)))))
+
 (define (read-vendor-extension)
   (match (read-byte)
     [0 (values 'pad #f)]
     [255 (values 'end #f)]
+    [1 (values 'subnet-mask (read-len-prefixed-addr))]
+    [3 (values 'router (read-addr-list))]
+    [6 (values 'dns-server (read-addr-list))]
+    [28 (values 'broadcast-address (read-len-prefixed-addr))]
+    [51 (values 'lease-time (read-len-prefixed-time))]
+    [54 (values 'server-identifier (read-len-prefixed-addr))]
     [58 (values 'renewal-time (read-len-prefixed-time))]
     [59 (values 'rebinding-time (read-len-prefixed-time))]
     ; TODO: Handle receiving less than n bytes.

@@ -22,6 +22,9 @@
 (struct init-state state () #:transparent)
 (struct selecting-state state (offers timeout) #:transparent)
 (struct requesting-state (chosen timeout when) #:transparent)
+; TODO: Put the lease information here since it is required for renewal.
+; Likely will need to pull out into another struct.
+; what is a good way to manage these towers of structs?
 (struct bound-state (renew rebind) #:transparent)
 
 (struct sm (current xid) #:transparent)

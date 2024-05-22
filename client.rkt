@@ -4,6 +4,7 @@
 (require racket/function)
 (require racket/udp)
 (require racket/list)
+(require racket/pretty)
 (require "message.rkt")
 (require "state-machine.rkt")
 
@@ -37,7 +38,7 @@
      (let loop ()
        (define-values (n src _) (udp-receive! sock resp))
        (define msg (parse (subbytes resp 0 n)))
-       (eprintf "GOT INCOMING UDP MESSAGE ~v from ~v~n" msg src)
+       (eprintf "GOT INCOMING UDP MESSAGE ~a from ~v~n" (pretty-format msg) src)
        (channel-put ch (incoming src msg))
        (loop)))))
 
@@ -72,7 +73,7 @@
       (match-define (update sm2 next-instant outgoing) (step sm (current-inexact-monotonic-milliseconds) msgs))
       (loop sm2 (alarm-evt next-instant #t) (append packets-to-send outgoing)))
 
-    (eprintf "SPIN LOOP ~v ~v~n" sm packets-to-send)
+    (eprintf "SPIN LOOP ~a ~v~n" (pretty-format sm) packets-to-send)
     (sync
      (handle-evt alarm (thunk* (spin null)))
      (handle-evt ch (compose1 spin list))
