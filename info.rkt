@@ -1,6 +1,6 @@
 #lang info
 (define collection "postal")
-(define deps '("base", "binaryio-lib", "net-ip-lib"))
+(define deps '("base" "binaryio-lib" "net-ip-lib"))
 (define build-deps '("scribble-lib" "racket-doc" "rackunit-lib"))
 (define scribblings '(("scribblings/postal.scrbl" ())))
 (define pkg-desc "A DHCP client")
