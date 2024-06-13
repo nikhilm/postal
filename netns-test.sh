@@ -18,7 +18,7 @@ ip netns exec dhcp-test-server ip link set dev veth0 up
 # TODO: Figure out how to kill these
 # tail /var/log/syslog to see these messages.
 # Can also always launch wireshark within the network namespace.
-ip netns exec dhcp-test-server dnsmasq --dhcp-range=172.16.1.100,172.16.1.200 --interface=veth0 --dhcp-leasefile=/dev/null --log-queries=extra --log-debug
+ip netns exec dhcp-test-server dnsmasq --dhcp-range=172.16.1.100,172.16.1.200,2m --interface=veth0 --dhcp-leasefile=/dev/null --log-queries=extra --log-debug
 
 sleep 1
 
