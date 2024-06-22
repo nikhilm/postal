@@ -3,9 +3,12 @@
 (require racket/list)
 (require racket/match)
 (require net/ip)
+(require racket/system)
 (require "message.rkt")
 
 (provide step make-state-machine send-msg incoming update)
+
+(struct lease-info (client-addr server-addr) #:transparent)
 
 ; we can't discriminate on them?
 ; we probably want to have a port that can take messages
@@ -25,7 +28,8 @@
 ; TODO: Put the lease information here since it is required for renewal.
 ; Likely will need to pull out into another struct.
 ; what is a good way to manage these towers of structs?
-(struct bound-state (renew rebind) #:transparent)
+(struct bound-state (renew rebind info) #:transparent)
+(struct renewing-state (rebind info) #:transparent)
 
 (struct sm (current xid) #:transparent)
 
@@ -93,24 +97,47 @@
          (error 'step "TODO: Handle not receiving ack")
 
          (match incomings
-           ; TODO: Handle other messages
+           ; TODO: Handle other kinds of messages instead of assuming this is an ack
            ; TODO: Match with chosen
            [(list (incoming src msg))
             (let ([maybe-renew (optionsf msg 'renewal-time)]
                   [maybe-rebind (optionsf msg 'rebinding-time)])
               (if (and maybe-renew maybe-rebind)
-                  (up-req (bound-state (+ when (seconds->milliseconds maybe-renew))
-                                       (+ when (seconds->milliseconds maybe-rebind)))
-                          (+ 5000 now)
-                          null)
+                  ; TODO: Move this out of the state-machine and into the client, which needs to understand outgoing
+                  ; beyond just packets to send, or provide another interface to the state machine or something (i.e. callbacks).
+                  (let* ([info (lease-info-from-ack msg)]
+                         [cmd (format "sudo ip addr add ~a/24 dev veth1" (ip-address->string (lease-info-client-addr info)))])
+                    (printf "COMMAND IS ~a~n" cmd)
+                    (system cmd)
+                    (up-req (bound-state (+ when (seconds->milliseconds maybe-renew))
+                                         (+ when (seconds->milliseconds maybe-rebind))
+                                         info)
+                            (+ 5000 now)
+                            null))
                   (error "TODO: Handle malformed message by going back to init or something")))]))]
 
-    [(and orig-state (bound-state renew-instant rebind-instant))
+    [(and orig-state (bound-state renew-instant rebind-instant info))
      (cond
-       [(>= now renew-instant) (error "TODO: Enter renewing")]
-       [(>= now rebind-instant) (error "TODO: Handle rebinding")]
+       [(>= now renew-instant)
+        (up-req (renewing-state rebind-instant info)
+                (+ 5000 now)
+                ; Send a message to the server we last had a lease from.
+                (list (send-msg
+                       (request-to-server (sm-xid machine) (lease-info-client-addr info))
+                       ; Perhaps we are not allowed to send non-broadcast packets if we don't have an IP.
+                       (ip-address->string (lease-info-server-addr info)))))]
        ; TODO: Wish there was a way to say "nothing changed"
-       [else (up-req orig-state (+ 5000 now) null)])]))
+       [else (up-req orig-state (+ 5000 now) null)])]
+
+    [(and orig-state (renewing-state rebind-instant info))
+     (if
+      (>= now rebind-instant)
+      (error "TODO: Enter rebinding")
+      (if (null? incomings)
+          (up-req orig-state (+ 5000 now) null)
+          (begin
+            (printf "MESSAGES ARE ~v~n" incomings)
+            (error "Process messages if any"))))]))
 
 (define (step machine now incomings)
   (update-machine
@@ -129,6 +156,40 @@
              0
              (list (message-option 50 (message-yiaddr msg))
                    (message-option 54 (ip-address->number (make-ip-address hostname)))))))
+
+(define (request-to-server xid ciaddr)
+  #|
+  DHCPREQUEST generated during RENEWING state:
+
+      'server identifier' MUST NOT be filled in, 'requested IP address'
+      option MUST NOT be filled in, 'ciaddr' MUST be filled in with
+      client's IP address. In this situation, the client is completely
+      configured, and is trying to extend its lease. This message will
+      be unicast, so no relay agents will be involved in its
+      transmission.  Because 'giaddr' is therefore not filled in, the
+      DHCP server will trust the value in 'ciaddr', and use it when
+      replying to the client.
+
+      A client MAY choose to renew or extend its lease prior to T1.  The
+      server may choose not to extend the lease (as a policy decision by
+      the network administrator), but should return a DHCPACK message
+      regardless.
+  |#
+  (message 'request
+           xid
+           0
+           (ip-address->number ciaddr)
+           0
+           0
+           0
+           null))
+
+(define (lease-info-from-ack msg)
+  (unless (eq? (message-type msg) 'ack)
+    (error "Not a DHCPACK message"))
+
+  (lease-info (number->ipv4-address (message-yiaddr msg))
+              (optionsf msg 'server-identifier)))
 
 (define (seconds->milliseconds sec)
   (* 1000 sec))

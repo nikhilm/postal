@@ -9,6 +9,13 @@
 (require binaryio)
 (require net/ip)
 
+(provide make-dhcpdiscover
+         encode
+         parse
+         (struct-out message)
+         (struct-out message-option)
+         optionsf)
+
 (struct message-option (tag value) #:transparent)
 
 (define (write-addr-option tag value)
@@ -212,12 +219,6 @@
                    xid secs ciaddr yiaddr siaddr giaddr options)
           (error 'parse "No dhcp message type found")))))
 
-(provide make-dhcpdiscover
-         encode
-         parse
-         (struct-out message)
-         (struct-out message-option)
-         optionsf)
 
 ; findf for message options
 ; returns the value or #f
