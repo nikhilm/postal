@@ -29,7 +29,7 @@
 ; Likely will need to pull out into another struct.
 ; what is a good way to manage these towers of structs?
 (struct bound-state (renew rebind info) #:transparent)
-(struct renewing-state (rebind info) #:transparent)
+(struct renewing-state (when rebind info) #:transparent)
 
 (struct sm (current xid) #:transparent)
 
@@ -93,6 +93,7 @@
           null))]
 
     [(requesting-state chosen timeout when)
+     ; TODO: Since this timeout is relative to when, but not dependent on the server response the struct doesn't need to store it.
      (if (>= now timeout)
          (error 'step "TODO: Handle not receiving ack")
 
@@ -102,6 +103,7 @@
            [(list (incoming src msg))
             (let ([maybe-renew (optionsf msg 'renewal-time)]
                   [maybe-rebind (optionsf msg 'rebinding-time)])
+              ; TODO: Handle 'lease-time and store it!
               (if (and maybe-renew maybe-rebind)
                   ; TODO: Move this out of the state-machine and into the client, which needs to understand outgoing
                   ; beyond just packets to send, or provide another interface to the state machine or something (i.e. callbacks).
@@ -119,9 +121,10 @@
     [(and orig-state (bound-state renew-instant rebind-instant info))
      (cond
        [(>= now renew-instant)
-        (up-req (renewing-state rebind-instant info)
+        (up-req (renewing-state now rebind-instant info)
                 (+ 5000 now)
                 ; Send a message to the server we last had a lease from.
+                ; TODO: Record local time at which lease sent, to calculate expiration time!
                 (list (send-msg
                        (request-to-server (sm-xid machine) (lease-info-client-addr info))
                        ; Perhaps we are not allowed to send non-broadcast packets if we don't have an IP.
@@ -129,15 +132,28 @@
        ; TODO: Wish there was a way to say "nothing changed"
        [else (up-req orig-state (+ 5000 now) null)])]
 
-    [(and orig-state (renewing-state rebind-instant info))
+    [(and orig-state (renewing-state when rebind-instant info))
      (if
+      ; TODO: There are a few timeouts to handle
+      ; assuming there is a >60s delta between renewing and rebinding time,
+      ; after 60s we should attempt to resend the request.
+      ; same for rebinding, up until the lease time expires.
       (>= now rebind-instant)
       (error "TODO: Enter rebinding")
       (if (null? incomings)
+          ; don't do anything until we hit rebinding if there are no incoming messages.
           (up-req orig-state (+ 5000 now) null)
           (begin
             (printf "MESSAGES ARE ~v~n" incomings)
-            (error "Process messages if any"))))]))
+            (let ([ack-resp (for/first ([inc (in-list incomings)]
+                                        ; TODO: Equals server, and is an ack.
+                                        ; I'm pretty sure the datatypes don't match here.
+                                        ; we at least need contracts, this is starting to get hairy.
+                                        ; also refactor this whole chunk
+                                        #:when (and (equal? (incoming-hostname inc) (lease-info-server-addr info))
+                                                    (message-type (incoming-msg inc) 'ack)))
+                              (incoming-msg inc))])
+              (error "Go back to bound")))))]))
 
 (define (step machine now incomings)
   (update-machine
