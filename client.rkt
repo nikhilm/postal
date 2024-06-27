@@ -1,10 +1,12 @@
 #lang racket/base
 
+(require racket/contract)
 (require racket/match)
 (require racket/function)
 (require racket/udp)
 (require racket/list)
 (require racket/pretty)
+(require net/ip)
 (require "message.rkt")
 (require "state-machine.rkt")
 
@@ -39,7 +41,7 @@
        (define-values (n src _) (udp-receive! sock resp))
        (define msg (parse (subbytes resp 0 n)))
        (eprintf "GOT INCOMING UDP MESSAGE ~a from ~v~n" (pretty-format msg) src)
-       (channel-put ch (incoming src msg))
+       (channel-put ch (incoming (make-ip-address src) msg))
        (loop)))))
 
 ; this struct does not have any state right now, but will likely need config options and stuff eventually.
@@ -69,14 +71,15 @@
              ; start with an immediately triggered alarm to get things going.
              [alarm (alarm-evt 0 #f)]
              [packets-to-send null])
-    (define (spin msgs)
-      (match-define (update sm2 next-instant outgoing) (step sm (current-inexact-monotonic-milliseconds) msgs))
+    (define/contract (spin incom)
+      ((or/c incoming? #f) . -> . void)
+      (match-define (update sm2 next-instant outgoing) (step sm (current-inexact-monotonic-milliseconds) incom))
       (loop sm2 (alarm-evt next-instant #t) (append packets-to-send outgoing)))
 
     (eprintf "SPIN LOOP ~a ~v~n" (pretty-format sm) packets-to-send)
     (sync
-     (handle-evt alarm (thunk* (spin null)))
-     (handle-evt ch (compose1 spin list))
+     (handle-evt alarm (thunk* (spin #f)))
+     (handle-evt ch spin)
      (if (null? packets-to-send)
          never-evt
          ; this is basically saying: when the socket is ready to receive data

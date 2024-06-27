@@ -1,13 +1,17 @@
 #lang racket/base
 
+(require racket/contract)
 (require racket/list)
 (require racket/match)
 (require net/ip)
 (require racket/system)
 (require "message.rkt")
 
-(provide step make-state-machine send-msg incoming update)
+(provide step make-state-machine send-msg
+         (struct-out incoming)
+         (struct-out update))
 
+; fields should be make-ip-address addresses
 (struct lease-info (client-addr server-addr) #:transparent)
 
 ; we can't discriminate on them?
@@ -18,7 +22,7 @@
 (struct send-msg (msg to) #:transparent)
 
 ; incoming event structs
-(struct incoming (hostname msg) #:transparent)
+(struct incoming (sender msg) #:transparent)
 (struct update (sm next-timeout-instant outgoing) #:transparent)
 
 (struct state () #:transparent)
@@ -38,10 +42,8 @@
 (define (make-state-machine [start (init-state)] [xid 0])
   (sm start xid))
 
-
 (define (next-xid xid)
-  (let ([new-xid (add1 xid)])
-    (if (> new-xid 4294967295) 0 new-xid)))
+  (modulo (add1 xid) 4294967295))
 
 (struct up-req (new-state timeout outgoing) #:transparent)
 
@@ -57,8 +59,8 @@
 ; unlike OOP 2 functions for stuff (one to send in new data, one to receive events)
 ; i think we may be able to get away with just one, as long as we pass around some stuff internally.
 ; -> update
-(define (step-internal machine now incomings)
-  ; TODO: contract
+(define/contract (step-internal machine now incom)
+  (sm? real? (or/c incoming? #f) . -> . up-req?)
   (match (sm-current machine)
     [(init-state) (up-req
                    ; TODO: Jitter the timeout
@@ -86,9 +88,8 @@
                            (sm-xid machine) (first offers)) 'broadcast)))
 
          (up-req
-          (selecting-state (for/list ([ic (in-list incomings)])
-                             ; TODO: Validate that the incoming packet is a offer
-                             ic) timeout)
+          ; TODO: Validate that the incoming packet is a offer
+          (selecting-state (append offers (if incom (list incom) null)) timeout)
           timeout
           null))]
 
@@ -97,10 +98,10 @@
      (if (>= now timeout)
          (error 'step "TODO: Handle not receiving ack")
 
-         (match incomings
+         (match incom
            ; TODO: Handle other kinds of messages instead of assuming this is an ack
            ; TODO: Match with chosen
-           [(list (incoming src msg))
+           [(incoming src msg)
             (let ([maybe-renew (optionsf msg 'renewal-time)]
                   [maybe-rebind (optionsf msg 'rebinding-time)])
               ; TODO: Handle 'lease-time and store it!
@@ -140,28 +141,24 @@
       ; same for rebinding, up until the lease time expires.
       (>= now rebind-instant)
       (error "TODO: Enter rebinding")
-      (if (null? incomings)
+      (if (not incom)
           ; don't do anything until we hit rebinding if there are no incoming messages.
           (up-req orig-state (+ 5000 now) null)
           (begin
-            (printf "MESSAGES ARE ~v~n" incomings)
-            (let ([ack-resp (for/first ([inc (in-list incomings)]
-                                        ; TODO: Equals server, and is an ack.
-                                        ; I'm pretty sure the datatypes don't match here.
-                                        ; we at least need contracts, this is starting to get hairy.
-                                        ; also refactor this whole chunk
-                                        #:when (and (equal? (incoming-hostname inc) (lease-info-server-addr info))
-                                                    (message-type (incoming-msg inc) 'ack)))
-                              (incoming-msg inc))])
-              (error "Go back to bound")))))]))
+            (printf "INCOMING MESSAGE IS ~v~n" incom)
+            (if (and (equal? (incoming-sender incom) (lease-info-server-addr info))
+                     (equal? (message-type (incoming-msg incom)) 'ack))
+                (error "Go back to bound")
+                (error "Need to handle not an ack")))))]))
 
-(define (step machine now incomings)
+(define/contract (step machine now incom)
+  (sm? real? (or/c incoming? #f) . -> . update?)
   (update-machine
    machine
-   (step-internal machine now incomings)))
+   (step-internal machine now incom)))
 
 (define (request-from-offer xid offer)
-  (match-let ([(struct incoming (hostname msg)) offer])
+  (match-let ([(struct incoming (sender msg)) offer])
     (message 'request
              xid
              ; TODO: secs, should be the same as discover
@@ -171,7 +168,7 @@
              0
              0
              (list (message-option 50 (message-yiaddr msg))
-                   (message-option 54 (ip-address->number (make-ip-address hostname)))))))
+                   (message-option 54 (ip-address->number sender))))))
 
 (define (request-to-server xid ciaddr)
   #|
@@ -224,13 +221,13 @@
      (message-options msg)))
 
   (define (wrap-message msg [sender (canonical-server-ip)])
-    (incoming (ip-address->string sender) msg))
+    (incoming sender msg))
 
   (test-case
    "Starting in init leads to a request to send DHCPDISCOVER"
    (define s (make-state-machine))
    ; no input required
-   (match-define (update _ _ (list next-event)) (step s 0 null))
+   (match-define (update _ _ (list next-event)) (step s 0 #f))
    (check-match next-event
                 (send-msg message to)
                 (and (equal? (message-type message) 'discover)
@@ -241,10 +238,10 @@
   (test-case
    "When in selecting, offers are considered for 10 seconds"
    (define stepped
-     (for/fold ([upd (update (make-state-machine) 0 null)])
-               ([args (list '(7 ())
-                            `(8000 (,(wrap-message (message 'offer 72 0 0 0 0 0 null))))
-                            '(11000 ()))])
+     (for/fold ([upd (update (make-state-machine) 0 #f)])
+               ([args (list '(7 #f)
+                            `(8000 ,(wrap-message (message 'offer 72 0 0 0 0 0 null)))
+                            '(11000 #f))])
        (apply step (update-sm upd) args)))
    ; probably should use some check form that prints each substep diff
    (check-match (first (update-outgoing stepped))
