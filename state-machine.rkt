@@ -223,6 +223,13 @@
   (define (wrap-message msg [sender (canonical-server-ip)])
     (incoming sender msg))
 
+  (define (multi-step sm steps)
+    ; step sm by applying each entry in steps.
+    ; return the final update
+    (for/fold ([upd (update sm 0 #f)])
+              ([step-args (in-list steps)])
+      (apply step (update-sm upd) step-args)))
+
   (test-case
    "Starting in init leads to a request to send DHCPDISCOVER"
    (define s (make-state-machine))
@@ -238,11 +245,10 @@
   (test-case
    "When in selecting, offers are considered for 10 seconds"
    (define stepped
-     (for/fold ([upd (update (make-state-machine) 0 #f)])
-               ([args (list '(7 #f)
-                            `(8000 ,(wrap-message (message 'offer 72 0 0 0 0 0 null)))
-                            '(11000 #f))])
-       (apply step (update-sm upd) args)))
+     (multi-step (make-state-machine)
+                 (list '(7 #f)
+                       `(8000 ,(wrap-message (message 'offer 72 0 0 0 0 0 null)))
+                       '(11000 #f))))
    ; probably should use some check form that prints each substep diff
    (check-match (first (update-outgoing stepped))
                 (send-msg message to)
@@ -250,6 +256,16 @@
                      (equal? to 'broadcast)
                      (equal? (message-option-value (extract-option message 54))
                              (ip-address->number (canonical-server-ip))))))
+
+  (test-case
+   "An offer with a non-matching xid is ignored, machine remains in selecting-state."
+   ; start xid at 34 and then send something lower.
+   (define stepped
+     (multi-step (make-state-machine (selecting-state null 10000) 34)
+                 (list `(4000 ,(wrap-message (message 'offer 72 0 0 0 0 0 null)))
+                       '(11000 #f))))
+   (check-match (sm-current (update-sm stepped))
+                (selecting-state _ _)))
 
   (test-case
    "Handle transition to bound"
