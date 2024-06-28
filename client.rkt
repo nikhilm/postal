@@ -9,6 +9,7 @@
 (require net/ip)
 (require "message.rkt")
 (require "state-machine.rkt")
+(require "logger.rkt")
 
 (provide make-dhcp-client
          run)
@@ -40,7 +41,7 @@
      (let loop ()
        (define-values (n src _) (udp-receive! sock resp))
        (define msg (parse (subbytes resp 0 n)))
-       (eprintf "GOT INCOMING UDP MESSAGE ~a from ~v~n" (pretty-format msg) src)
+       (log-postal-debug "Incoming message: ~a from ~v" (pretty-format msg) src)
        (channel-put ch (incoming (make-ip-address src) msg))
        (loop)))))
 
@@ -77,7 +78,6 @@
         (match-define (update sm2 next-instant outgoing) (step sm (current-inexact-monotonic-milliseconds) incom))
         (loop sm2 (alarm-evt next-instant #t) (append packets-to-send outgoing)))
 
-      (eprintf "SPIN LOOP ~a ~v~n" (pretty-format sm) packets-to-send)
       (sync
        (handle-evt alarm (thunk* (spin #f)))
        (handle-evt ch spin)
@@ -95,6 +95,7 @@
                                                         67
                                                         (encode msg))
                                        (lambda (e)
+                                         (log-postal-debug "Sent ~v to ~v" msg to)
                                          (loop sm alarm (rest packets-to-send))))))))))))
 
 

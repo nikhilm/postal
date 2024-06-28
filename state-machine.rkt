@@ -5,6 +5,7 @@
 (require racket/match)
 (require net/ip)
 (require racket/system)
+(require "logger.rkt")
 (require "message.rkt")
 
 (provide step make-state-machine send-msg
@@ -110,7 +111,7 @@
                   ; beyond just packets to send, or provide another interface to the state machine or something (i.e. callbacks).
                   (let* ([info (lease-info-from-ack msg)]
                          [cmd (format "sudo ip addr add ~a/24 dev veth1" (ip-address->string (lease-info-client-addr info)))])
-                    (printf "COMMAND IS ~a~n" cmd)
+                    (log-postal-info "Running ~a" cmd)
                     (system cmd)
                     (up-req (bound-state (+ when (seconds->milliseconds maybe-renew))
                                          (+ when (seconds->milliseconds maybe-rebind))
