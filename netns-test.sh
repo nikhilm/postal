@@ -28,6 +28,7 @@ sleep 1
 # TODO: If we cna express each test as running
 # as a separate IP or something, then we may
 # not need to spin up dnsmasq every time.
+ip netns exec dhcp-test-client ip link set veth1 address 00:11:22:33:44:55
 ip netns exec dhcp-test-client ip link set dev veth1 up
 ip netns exec dhcp-test-client ip route add default dev veth1
 # ip netns exec dhcp-test-client /bin/bash

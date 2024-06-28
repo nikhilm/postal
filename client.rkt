@@ -45,15 +45,15 @@
        (loop)))))
 
 ; this struct does not have any state right now, but will likely need config options and stuff eventually.
-(struct dhcp-client ())
-(define (make-dhcp-client) (dhcp-client))
+(struct dhcp-client (mac-addr))
+(define (make-dhcp-client mac-addr) (dhcp-client mac-addr))
 
 ; TODO
 #|the DHCPREQUEST message MUST use the same
      value in the DHCP message header's 'secs' field and be sent to the
      same IP broadcast address as the original DHCPDISCOVER message.|#
 
-(define (run _client)
+(define (run client)
   ; TODO: Handle break to potentially shutdown cleanly (i.e. give up lease)
   ;(let loop ())
 
@@ -67,34 +67,35 @@
   (define ch (make-channel))
   ; TODO: Custodians and things for shutting down run
   (define recv-thread (make-recv-thread sock ch))
-  (let loop ([sm (make-state-machine)]
-             ; start with an immediately triggered alarm to get things going.
-             [alarm (alarm-evt 0 #f)]
-             [packets-to-send null])
-    (define/contract (spin incom)
-      ((or/c incoming? #f) . -> . void)
-      (match-define (update sm2 next-instant outgoing) (step sm (current-inexact-monotonic-milliseconds) incom))
-      (loop sm2 (alarm-evt next-instant #t) (append packets-to-send outgoing)))
+  (parameterize ([interface-mac-addr (make-mac-addr (dhcp-client-mac-addr client))])
+    (let loop ([sm (make-state-machine)]
+               ; start with an immediately triggered alarm to get things going.
+               [alarm (alarm-evt 0 #f)]
+               [packets-to-send null])
+      (define/contract (spin incom)
+        ((or/c incoming? #f) . -> . void)
+        (match-define (update sm2 next-instant outgoing) (step sm (current-inexact-monotonic-milliseconds) incom))
+        (loop sm2 (alarm-evt next-instant #t) (append packets-to-send outgoing)))
 
-    (eprintf "SPIN LOOP ~a ~v~n" (pretty-format sm) packets-to-send)
-    (sync
-     (handle-evt alarm (thunk* (spin #f)))
-     (handle-evt ch spin)
-     (if (null? packets-to-send)
-         never-evt
-         ; this is basically saying: when the socket is ready to receive data
-         ; grab the first outgoing packet, and replace the event with an attempt
-         ; to send that packet. then continue the loop.
-         ; waiting on readiness allows delaying unpacking the first outgoing packet.
-         (replace-evt (udp-send-ready-evt sock)
-                      (thunk*
-                       (match-let ([(send-msg msg to) (first packets-to-send)])
-                         (handle-evt (udp-send-to-evt sock
-                                                      (pick-recepient to)
-                                                      67
-                                                      (encode msg))
-                                     (lambda (e)
-                                       (loop sm alarm (rest packets-to-send)))))))))))
+      (eprintf "SPIN LOOP ~a ~v~n" (pretty-format sm) packets-to-send)
+      (sync
+       (handle-evt alarm (thunk* (spin #f)))
+       (handle-evt ch spin)
+       (if (null? packets-to-send)
+           never-evt
+           ; this is basically saying: when the socket is ready to receive data
+           ; grab the first outgoing packet, and replace the event with an attempt
+           ; to send that packet. then continue the loop.
+           ; waiting on readiness allows delaying unpacking the first outgoing packet.
+           (replace-evt (udp-send-ready-evt sock)
+                        (thunk*
+                         (match-let ([(send-msg msg to) (first packets-to-send)])
+                           (handle-evt (udp-send-to-evt sock
+                                                        (pick-recepient to)
+                                                        67
+                                                        (encode msg))
+                                       (lambda (e)
+                                         (loop sm alarm (rest packets-to-send))))))))))))
 
 
 (define (pick-recepient addr)

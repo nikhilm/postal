@@ -19,5 +19,6 @@
   ; tcpreplay may allow replaying actual packets.
   ; however what I mean is, even when reading dnsmasq responses from the network, separate the packet reading
   ; so we can force the state machine to tick at our own pace.
-  (define client (make-dhcp-client))
+  ; The mac addr is set by netns-test.sh right now.
+  (define client (make-dhcp-client "00:11:22:33:44:55"))
   (run client))

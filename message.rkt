@@ -2,6 +2,9 @@
 
 (require racket/contract)
 (require racket/match)
+(require racket/string)
+; silly, but required for hex-string->bytes.
+(require file/sha1)
 (require racket/port)
 (require racket/pretty)
 ; TODO: If we are only using write-integer and read-integer, we can inline their suggested
@@ -14,7 +17,9 @@
          parse
          (struct-out message)
          (struct-out message-option)
-         optionsf)
+         optionsf
+         interface-mac-addr
+         make-mac-addr)
 
 (struct message-option (tag value) #:transparent)
 
@@ -39,14 +44,21 @@
    ) #:transparent)
 
 ; TODO: Move out of this module.
-(define (get-interface-mac-addr)
-  ; chaddr
-  ; currently the mac address for this computer's wifi
-  ; 70:cd:0d:a0:4d:d5
-  ; this is 6 bytes, with another 10 bytes of padding.
-  ; written as straight byte at a time, no endianness
-  ;#"\x70\xcd\x0d\xa0\x4d\xd5\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
-  #"\xf6\x52\x8d\x05\xc0\x45\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+(define interface-mac-addr
+  (make-parameter
+   #f
+   (lambda (v)
+     (unless (equal? (bytes-length v) 16)
+       (error "Must be a 16-byte byte string"))
+     v)))
+
+; Convert a string mac addr of the form "xx:xx:xx:xx:xx:xx" to a reasonable byte string to be used with interface-mac-addr
+(define (make-mac-addr in)
+  (let* ([plain (string-replace in ":" "")]
+         [converted (hex-string->bytes plain)])
+    (unless (equal? (bytes-length converted) 6)
+      (error "Invalid mac address: ~v" in))
+    (bytes-append converted (make-bytes 10 0))))
 
 (define (dhcp-type->int type)
   (match type
@@ -116,7 +128,10 @@
       (write-int-addr (message-giaddr msg))
 
       ; chaddr
-      (write-bytes (get-interface-mac-addr))
+      (let ([mac (interface-mac-addr)])
+        (unless mac
+          (error "parameter interface-mac-addr is not set!"))
+        (write-bytes mac))
 
       ; sname
       (write-bytes (make-bytes 64))
