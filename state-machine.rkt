@@ -28,7 +28,7 @@
 
 (struct state () #:transparent)
 (struct init-state state () #:transparent)
-(struct selecting-state state (offers timeout) #:transparent)
+(struct selecting-state state (offers timeout expected-xid) #:transparent)
 (struct requesting-state (chosen timeout when) #:transparent)
 ; TODO: Put the lease information here since it is required for renewal.
 ; Likely will need to pull out into another struct.
@@ -40,8 +40,8 @@
 
 ; this is the sort of thing that would be nice to not have to carry around everywhere
 ; TODO: Randomize xid
-(define (make-state-machine [start (init-state)] [xid 0])
-  (sm start xid))
+(define (make-state-machine #:current [current (init-state)] #:xid [xid 0])
+  (sm current xid))
 
 (define (next-xid xid)
   (modulo (add1 xid) 4294967295))
@@ -65,34 +65,43 @@
   (match (sm-current machine)
     [(init-state) (up-req
                    ; TODO: Jitter the timeout
-                   (selecting-state null (+ 10000 now))
+                   (selecting-state null (+ 10000 now) (sm-xid machine))
                    (+ 10000 now)
                    (list (send-msg (make-dhcpdiscover (sm-xid machine)) 'broadcast)))]
 
     ; TODO: Response xid validation.
-    [(selecting-state offers timeout)
+    [(selecting-state offers timeout expected-xid)
      (if (>= now timeout)
-         ; TODO: Pick the best offer from offers
-         ; TODO: Handle no offers - client has to retry with some timeout
-         (up-req
-          ; TODO: Jitter the timeout
-          ; It is quite possible for the client to not send out the request offer "right away" relative to `now`
-          ; but it seems pretty unlikely in practice.
-          (requesting-state (first offers) (+ 10000 now) now)
-          ; if the server does not respond within this time, we need to do more stuff
-          ; TODO: Handle this case
-          (+ 10000 now)
-          ; TODO: Set options requested IP and server identifier
-          ; TODO: Propagate the current now via requesting to bound, since t1 and t2 are calculated from there
-          (list (send-msg (request-from-offer
-                           ; TODO: Save the xid in the requesting-state so that the ack can be matched
-                           (sm-xid machine) (first offers)) 'broadcast)))
+         (if offers
+             (up-req
+              ; TODO: Jitter the timeout
+              ; It is quite possible for the client to not send out the request offer "right away" relative to `now`
+              ; but it seems pretty unlikely in practice.
+              (requesting-state (first offers) (+ 10000 now) now)
+              ; if the server does not respond within this time, we need to do more stuff
+              ; TODO: Handle this case
+              (+ 10000 now)
+              ; TODO: Set options requested IP and server identifier
+              ; TODO: Propagate the current now via requesting to bound, since t1 and t2 are calculated from there
+              (list (send-msg (request-from-offer
+                               ; TODO: Save the xid in the requesting-state so that the ack can be matched
+                               (sm-xid machine) (first offers)) 'broadcast)))
+             ; TODO: Client should probably retry, and this needs to indicate that somehow.
+             (error "Need to handle this state"))
 
-         (up-req
-          ; TODO: Validate that the incoming packet is a offer
-          (selecting-state (append offers (if incom (list incom) null)) timeout)
-          timeout
-          null))]
+         (if (reasonable-offer? incom expected-xid)
+             (begin
+               (log-postal-debug "considered reasonable ~a" incom)
+               (up-req
+                ; TODO: Validate that the incoming packet is a offer
+                (selecting-state (append offers (list incom)) timeout expected-xid)
+                timeout
+                null))
+             (begin
+               (log-postal-warning "Dropping incoming ~a since it is not reasonable." incom)
+               (up-req (selecting-state offers timeout expected-xid)
+                       timeout
+                       null))))]
 
     [(requesting-state chosen timeout when)
      ; TODO: Since this timeout is relative to when, but not dependent on the server response the struct doesn't need to store it.
@@ -207,6 +216,12 @@
 (define (seconds->milliseconds sec)
   (* 1000 sec))
 
+(define (reasonable-offer? incom expected-xid)
+  (match incom
+    [(incoming src (struct* message ([type 'offer] [xid (== expected-xid)])))
+     #t]
+    [_ #f]))
+
 (module+ test
   (require rackunit)
   (require net/ip)
@@ -245,10 +260,10 @@
   (test-case
    "When in selecting, offers are considered for 10 seconds"
    (define stepped
-     (multi-step (make-state-machine)
+     (multi-step (make-state-machine #:xid 34)
                  (list '(7 #f)
                        `(8000 ,(wrap-message (message 'offer
-                                                      72
+                                                      34
                                                       0
                                                       (number->ipv4-address 0)
                                                       (number->ipv4-address 0)
@@ -262,13 +277,13 @@
                 (and (equal? (message-type message) 'request)
                      (equal? to 'broadcast)
                      (equal? (message-option-value (extract-option message 54))
-                             (ip-address->number (canonical-server-ip))))))
+                             (canonical-server-ip)))))
 
   (test-case
-   "An offer with a non-matching xid is ignored, machine remains in selecting-state."
+   "An offer with a non-matching xid is ignored."
    ; start xid at 34 and then send something lower.
    (define stepped
-     (multi-step (make-state-machine (selecting-state null 10000) 34)
+     (multi-step (make-state-machine #:current (selecting-state null 10000 34) #:xid 34)
                  (list `(4000 ,(wrap-message (message 'offer
                                                       72
                                                       0
@@ -276,10 +291,8 @@
                                                       (number->ipv4-address 0)
                                                       (number->ipv4-address 0)
                                                       (number->ipv4-address 0)
-                                                      null)))
-                       '(11000 #f))))
-   (check-match (sm-current (update-sm stepped))
-                (selecting-state _ _)))
+                                                      null))))))
+   (check-exn exn:fail? (lambda () (step (update-sm stepped) 11000 #f))))
 
   (test-case
    "Handle transition to bound"
