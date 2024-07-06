@@ -26,7 +26,7 @@
 (define (write-addr-option tag value)
   (write-byte tag)
   (write-byte 4)
-  (write-int-addr value))
+  (write-int-addr (ip-address->number value)))
 
 (define/match (write-option option)
   [((message-option 50 value)) (write-addr-option 50 value)]
@@ -36,10 +36,10 @@
   (type ; symbol
    xid ; int
    secs ; int
-   ciaddr ; int
-   yiaddr ; int
-   siaddr ; int
-   giaddr ; int
+   ciaddr ; ip-address?
+   yiaddr ; ip-address?
+   siaddr ; ip-address?
+   giaddr ; ip-address?
    options ; list
    ) #:transparent)
 
@@ -86,7 +86,7 @@
   (write-integer addr 4 #f))
 
 (define (read-int-addr)
-  (read-integer 4 #f))
+  (number->ipv4-address (read-integer 4 #f)))
 
 (define/contract (encode msg)
   (message? . -> . bytes?)
@@ -116,16 +116,16 @@
       (write-integer #x8000 2 #f)
 
       ; ciaddr
-      (write-int-addr (message-ciaddr msg))
+      (write-int-addr (ip-address->number (message-ciaddr msg)))
 
       ; yiaddr
-      (write-int-addr (message-yiaddr msg))
+      (write-int-addr (ip-address->number (message-yiaddr msg)))
 
       ; siaddr
-      (write-int-addr (message-siaddr msg))
+      (write-int-addr (ip-address->number (message-siaddr msg)))
 
       ; giaddr
-      (write-int-addr (message-giaddr msg))
+      (write-int-addr (ip-address->number (message-giaddr msg)))
 
       ; chaddr
       (let ([mac (interface-mac-addr)])
@@ -242,8 +242,14 @@
     (and opt (message-option-value opt))))
 
 (define (make-dhcpdiscover xid)
-  (message 'discover xid 0 0 0 0 0 null))
-
+  (message 'discover
+           xid
+           0
+           (number->ipv4-address 0)
+           (number->ipv4-address 0)
+           (number->ipv4-address 0)
+           (number->ipv4-address 0)
+           null))
 
 (module+ test
   ; TODO: Request claude to generate a fuzzer for the parsers

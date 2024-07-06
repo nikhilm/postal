@@ -146,7 +146,6 @@
           ; don't do anything until we hit rebinding if there are no incoming messages.
           (up-req orig-state (+ 5000 now) null)
           (begin
-            (printf "INCOMING MESSAGE IS ~v~n" incom)
             (if (and (equal? (incoming-sender incom) (lease-info-server-addr info))
                      (equal? (message-type (incoming-msg incom)) 'ack))
                 (error "Go back to bound")
@@ -164,12 +163,12 @@
              xid
              ; TODO: secs, should be the same as discover
              0
-             0
-             0
-             0
-             0
+             (number->ipv4-address 0)
+             (number->ipv4-address 0)
+             (number->ipv4-address 0)
+             (number->ipv4-address 0)
              (list (message-option 50 (message-yiaddr msg))
-                   (message-option 54 (ip-address->number sender))))))
+                   (message-option 54 sender)))))
 
 (define (request-to-server xid ciaddr)
   #|
@@ -192,17 +191,17 @@
   (message 'request
            xid
            0
-           (ip-address->number ciaddr)
-           0
-           0
-           0
+           ciaddr
+           (number->ipv4-address 0)
+           (number->ipv4-address 0)
+           (number->ipv4-address 0)
            null))
 
 (define (lease-info-from-ack msg)
   (unless (eq? (message-type msg) 'ack)
     (error "Not a DHCPACK message"))
 
-  (lease-info (number->ipv4-address (message-yiaddr msg))
+  (lease-info (message-yiaddr msg)
               (optionsf msg 'server-identifier)))
 
 (define (seconds->milliseconds sec)
@@ -248,7 +247,14 @@
    (define stepped
      (multi-step (make-state-machine)
                  (list '(7 #f)
-                       `(8000 ,(wrap-message (message 'offer 72 0 0 0 0 0 null)))
+                       `(8000 ,(wrap-message (message 'offer
+                                                      72
+                                                      0
+                                                      (number->ipv4-address 0)
+                                                      (number->ipv4-address 0)
+                                                      (number->ipv4-address 0)
+                                                      (number->ipv4-address 0)
+                                                      null)))
                        '(11000 #f))))
    ; probably should use some check form that prints each substep diff
    (check-match (first (update-outgoing stepped))
@@ -263,7 +269,14 @@
    ; start xid at 34 and then send something lower.
    (define stepped
      (multi-step (make-state-machine (selecting-state null 10000) 34)
-                 (list `(4000 ,(wrap-message (message 'offer 72 0 0 0 0 0 null)))
+                 (list `(4000 ,(wrap-message (message 'offer
+                                                      72
+                                                      0
+                                                      (number->ipv4-address 0)
+                                                      (number->ipv4-address 0)
+                                                      (number->ipv4-address 0)
+                                                      (number->ipv4-address 0)
+                                                      null)))
                        '(11000 #f))))
    (check-match (sm-current (update-sm stepped))
                 (selecting-state _ _)))
