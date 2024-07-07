@@ -12,20 +12,17 @@
          (struct-out incoming)
          (struct-out update))
 
-; fields should be make-ip-address addresses
+; fields are ip-address?
 (struct lease-info (client-addr server-addr) #:transparent)
 
-; we can't discriminate on them?
-; we probably want to have a port that can take messages
-; if we do want to sync on that.
-
-; outgoing event structs
+; outgoing event structs. to can be 'broadcast or ip-address?
 (struct send-msg (msg to) #:transparent)
 
 ; incoming event structs
 (struct incoming (sender msg) #:transparent)
 (struct update (sm next-timeout-instant outgoing) #:transparent)
 
+; states
 (struct state () #:transparent)
 (struct init-state state () #:transparent)
 (struct selecting-state state (offers timeout expected-xid) #:transparent)
@@ -55,8 +52,6 @@
                                                     (update (sm new-state nxid)
                                                             timeout outgoing)])
 
-; TODO: Accept configuration like mac address, xid, starting local time and so on.
-; TODO: Consider making incoming just a single message, since state can change based on a single message.
 ; unlike OOP 2 functions for stuff (one to send in new data, one to receive events)
 ; i think we may be able to get away with just one, as long as we pass around some stuff internally.
 ; -> update
@@ -121,7 +116,7 @@
                   (let* ([info (lease-info-from-ack msg)]
                          [cmd (format "sudo ip addr add ~a/24 dev veth1" (ip-address->string (lease-info-client-addr info)))])
                     (log-postal-info "Running ~a" cmd)
-                    (system cmd)
+                    ; (system cmd)
                     (up-req (bound-state (+ when (seconds->milliseconds maybe-renew))
                                          (+ when (seconds->milliseconds maybe-rebind))
                                          info)
@@ -138,8 +133,7 @@
                 ; TODO: Record local time at which lease sent, to calculate expiration time!
                 (list (send-msg
                        (request-to-server (sm-xid machine) (lease-info-client-addr info))
-                       ; Perhaps we are not allowed to send non-broadcast packets if we don't have an IP.
-                       (ip-address->string (lease-info-server-addr info)))))]
+                       (lease-info-server-addr info))))]
        ; TODO: Wish there was a way to say "nothing changed"
        [else (up-req orig-state (+ 5000 now) null)])]
 
@@ -296,4 +290,29 @@
 
   (test-case
    "Handle transition to bound"
-   (fail "TODO transition to bound")))
+   (define sm (make-state-machine #:current (requesting-state #f 10 1000) #:xid 23))
+   (define up (step sm 4 (incoming (canonical-server-ip)
+                                   (message
+                                    'ack
+                                    23
+                                    0
+                                    (make-ip-address "172.16.1.182")
+                                    (make-ip-address "172.16.1.182")
+                                    (make-ip-address "172.16.1.1")
+                                    (make-ip-address "0.0.0.0")
+                                    (list
+                                     (message-option 'server-identifier (make-ip-address "172.16.1.1"))
+                                     (message-option 'lease-time 120)
+                                     (message-option 'renewal-time 56)
+                                     (message-option 'rebinding-time 101)
+                                     (message-option 'subnet-mask (make-ip-address "255.255.255.0"))
+                                     (message-option 'broadcast-address (make-ip-address "172.16.1.255"))
+                                     (message-option 'router (make-ip-address "172.16.1.1"))
+                                     (message-option 'dns-server (make-ip-address "172.16.1.1")))))))
+   (match-define (update new-sm _ _) up)
+   (check-match (sm-current new-sm)
+                (bound-state 57000
+                             102000
+                             (lease-info client server))
+                (and (equal? client (make-ip-address "172.16.1.182"))
+                     (equal? server (make-ip-address "172.16.1.1"))))))

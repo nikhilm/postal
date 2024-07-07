@@ -113,10 +113,9 @@ EOF
                                          (loop sm alarm (rest packets-to-send))))))))))))
 
 
-(define (pick-recepient addr)
-  (case addr
-    [(broadcast) "255.255.255.255"]
-    [else addr]))
+(define/match (pick-recepient addr)
+  [(broadcast) "255.255.255.255"]
+  [(_) (ip-address->string addr)])
 
 #|
 OK, few things to sort out with the design
