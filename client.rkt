@@ -29,6 +29,22 @@
 ; this means, in the loop, for every state, we gotta sync on new messages or timer expiries of various kinds, or shutdown requests
 ; and then make a decision.
 
+(define (parse-failure-handler data src e)
+  (log-postal-warning #<<EOF
+Dropped incoming message, since it was malformed.
+  data length: ~a
+  sender: ~a
+  parse error: ~a
+EOF
+                      (bytes-length data) src (exn-message e)))
+
+(define (parse-and-send-dgram data src ch)
+  (with-handlers ([exn:fail:parse-message?
+                   (lambda (e) (parse-failure-handler data src e))])
+    (define msg (parse data))
+    (log-postal-debug "Incoming message: ~a from ~v" (pretty-format msg) src)
+    (channel-put ch (incoming src msg))))
+
 (define (make-recv-thread sock ch)
   ; note that with an unbuffered channel
   ; we are relying on the caller reading messages
@@ -40,9 +56,7 @@
      (define resp (make-bytes 65536))
      (let loop ()
        (define-values (n src _) (udp-receive! sock resp))
-       (define msg (parse (subbytes resp 0 n)))
-       (log-postal-debug "Incoming message: ~a from ~v" (pretty-format msg) src)
-       (channel-put ch (incoming (make-ip-address src) msg))
+       (parse-and-send-dgram (subbytes resp 0 n) (make-ip-address src) ch)
        (loop)))))
 
 ; this struct does not have any state right now, but will likely need config options and stuff eventually.
@@ -123,6 +137,16 @@ OK, few things to sort out with the design
 
 (module+ test
   (require rackunit)
-  (test-case "Malformed incoming messages are discarded"
-             (fail "TODO: Implement me")))
-
+  (test-case
+   "Malformed incoming messages are discarded"
+   (define correct
+     (parameterize ([interface-mac-addr (make-mac-addr "00:11:22:33:44:55")])
+       (encode (make-dhcpdiscover 17))))
+   (define malformed (subbytes correct 5))
+   (define ch (make-channel))
+   (thread
+    (lambda ()
+      (parse-and-send-dgram malformed #f ch)))
+   (sync (handle-evt ch
+                     (lambda (_) (fail "Channel should not be ready, since message is discarded")))
+         (system-idle-evt))))

@@ -17,6 +17,7 @@
          parse
          (struct-out message)
          (struct-out message-option)
+         (struct-out exn:fail:parse-message)
          optionsf
          interface-mac-addr
          make-mac-addr)
@@ -42,6 +43,8 @@
    giaddr ; ip-address?
    options ; list
    ) #:transparent)
+
+(struct exn:fail:parse-message exn:fail ())
 
 ; TODO: Move out of this module.
 (define interface-mac-addr
@@ -186,53 +189,62 @@
     [tag (let ([n (read-byte)])
            (values tag (read-bytes n)))]))
 
+(define (parse-current-input)
+  ; generic handler in case a sub-parser did not raise a more specific error.
+  (with-handlers ([exn:fail?
+                   (lambda (e)
+                     (raise
+                      (exn:fail:parse-message
+                       (format "parse: Failed to parse message. Original exception: ~a" (exn-message e))
+                       (current-continuation-marks))))])
+    ; bootp message type to discard
+    ; TODO: Perhaps validate against the dhcp type
+    ; TODO: Fail all reads if they return eof.
+    (read-byte)
+
+    ; htype, don't care
+    (read-byte)
+
+    ; hlen, don't care right now
+    ; TODO: pass on server mac
+    (read-byte)
+
+    ; hops - don't care
+    (read-byte)
+
+    (define xid (read-integer 4 #f))
+    (define secs (read-integer 2 #f))
+    ;flags
+    (read-integer 2 #f)
+    ; ciaddr
+    (define ciaddr (read-int-addr))
+    (define yiaddr (read-int-addr))
+    (define siaddr (read-int-addr))
+    (define giaddr (read-int-addr))
+    (define chaddr (read-bytes 16))
+    (define sname (read-bytes 64))
+    (define file (read-bytes 128))
+    ; magic
+    (match (read-bytes 4)
+      [#"c\202Sc" void])
+    (define msg-type
+      (for/first ([(tag value) (in-producer read-vendor-extension)]
+                  #:break (eq? tag 'end)
+                  #:when (eq? tag 53))
+        value))
+    (define options
+      (for/list ([(tag value) (in-producer read-vendor-extension)]
+                 #:break (eq? tag 'end))
+        (message-option tag value)))
+    ; TODO: Is it valid for a message to have data beyond the last option?
+    (if msg-type
+        (message (int->dhcp-type (bytes->integer msg-type #f))
+                 xid secs ciaddr yiaddr siaddr giaddr options)
+        (error 'parse "No dhcp message type found"))))
+
 (define/contract (parse buf)
   (bytes? . -> . message?)
-  (with-input-from-bytes buf
-    (lambda ()
-      ; bootp message type to discard
-      ; TODO: Perhaps validate against the dhcp type
-      (read-byte)
-
-      ; htype, don't care
-      (read-byte)
-
-      ; hlen, don't care right now
-      ; TODO: pass on server mac
-      (read-byte)
-
-      ; hops - don't care
-      (read-byte)
-
-      (define xid (read-integer 4 #f))
-      (define secs (read-integer 2 #f))
-      ;flags
-      (read-integer 2 #f)
-      ; ciaddr
-      (define ciaddr (read-int-addr))
-      (define yiaddr (read-int-addr))
-      (define siaddr (read-int-addr))
-      (define giaddr (read-int-addr))
-      (define chaddr (read-bytes 16))
-      (define sname (read-bytes 64))
-      (define file (read-bytes 128))
-      ; magic
-      (match (read-bytes 4)
-        [#"c\202Sc" void])
-      (define msg-type
-        (for/first ([(tag value) (in-producer read-vendor-extension)]
-                    #:break (eq? tag 'end)
-                    #:when (eq? tag 53))
-          value))
-      (define options
-        (for/list ([(tag value) (in-producer read-vendor-extension)]
-                   #:break (eq? tag 'end))
-          (message-option tag value)))
-      ; TODO: Is it valid for a message to have data beyond the last option?
-      (if msg-type
-          (message (int->dhcp-type (bytes->integer msg-type #f))
-                   xid secs ciaddr yiaddr siaddr giaddr options)
-          (error 'parse "No dhcp message type found")))))
+  (with-input-from-bytes buf parse-current-input))
 
 
 ; findf for message options
