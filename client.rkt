@@ -5,8 +5,13 @@
 (require racket/function)
 (require racket/udp)
 (require racket/list)
+(require racket/port)
 (require racket/pretty)
+(require racket/string)
+(require racket/system)
+
 (require net/ip)
+
 (require "message.rkt")
 (require "state-machine.rkt")
 (require "logger.rkt")
@@ -90,6 +95,17 @@ EOF
       (define/contract (spin incom)
         ((or/c incoming? #f) . -> . void)
         (match-define (update sm2 next-instant outgoing) (step sm (current-inexact-monotonic-milliseconds) incom))
+        ; reconcile system state if required.
+        ; TODO: Use an event from the state machine instead of inspecting state directly.
+        ; TODO: Only execute the command if the IP is not set.
+        (match (sm-current sm2)
+          [(bound-state _ _ info)
+           (log-postal-debug "IP FOR DEVICE IS ~a" (ip-for-device "veth1"))
+           ; (unless (ip-for-device "veth1")
+           (set-ip-for-device "veth1" (lease-info-client-addr info))]
+          [_ void
+             ;(error "TODO: Unset IP if set")
+             ])
         (loop sm2 (alarm-evt next-instant #t) (append packets-to-send outgoing)))
 
       (sync
@@ -116,6 +132,19 @@ EOF
 (define/match (pick-recepient addr)
   [(broadcast) "255.255.255.255"]
   [(_) (ip-address->string addr)])
+
+; TODO: Switch to using CFFI
+(define (ip-for-device dev)
+  (define lines (with-input-from-file "/proc/net/arp" port->lines))
+  (for/first ([line (in-list lines)]
+              #:do [(define split (string-split line))]
+              #:when (equal? (last split) dev))
+    (first split)))
+
+(define (set-ip-for-device dev ip)
+  (let ([cmd (format "sudo ip addr add ~a/24 dev ~a" (ip-address->string ip) dev)])
+    (log-postal-info "Running ~a" cmd)
+    (system cmd)))
 
 #|
 OK, few things to sort out with the design

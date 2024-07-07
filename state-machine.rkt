@@ -4,13 +4,15 @@
 (require racket/list)
 (require racket/match)
 (require net/ip)
-(require racket/system)
 (require "logger.rkt")
 (require "message.rkt")
 
 (provide step make-state-machine send-msg
          (struct-out incoming)
-         (struct-out update))
+         (struct-out update)
+         (struct-out sm)
+         (struct-out lease-info)
+         (struct-out bound-state))
 
 ; fields are ip-address?
 (struct lease-info (client-addr server-addr) #:transparent)
