@@ -105,26 +105,7 @@
      (if (>= now timeout)
          (error 'step "TODO: Handle not receiving ack")
 
-         (match incom
-           ; TODO: Handle other kinds of messages instead of assuming this is an ack
-           ; TODO: Match with chosen
-           [(incoming src msg)
-            (let ([maybe-renew (optionsf msg 'renewal-time)]
-                  [maybe-rebind (optionsf msg 'rebinding-time)])
-              ; TODO: Handle 'lease-time and store it!
-              (if (and maybe-renew maybe-rebind)
-                  ; TODO: Move this out of the state-machine and into the client, which needs to understand outgoing
-                  ; beyond just packets to send, or provide another interface to the state machine or something (i.e. callbacks).
-                  (let* ([info (lease-info-from-ack msg)]
-                         [cmd (format "sudo ip addr add ~a/24 dev veth1" (ip-address->string (lease-info-client-addr info)))])
-                    (log-postal-info "Running ~a" cmd)
-                    ; (system cmd)
-                    (up-req (bound-state (+ when (seconds->milliseconds maybe-renew))
-                                         (+ when (seconds->milliseconds maybe-rebind))
-                                         info)
-                            (+ 5000 now)
-                            null))
-                  (error "TODO: Handle malformed message by going back to init or something")))]))]
+         (maybe-ack-to-bound incom now when))]
 
     [(and orig-state (bound-state renew-instant rebind-instant info))
      (cond
@@ -153,7 +134,7 @@
           (begin
             (if (and (equal? (incoming-sender incom) (lease-info-server-addr info))
                      (equal? (message-type (incoming-msg incom)) 'ack))
-                (error "Go back to bound")
+                (maybe-ack-to-bound incom now when)
                 (error "Need to handle not an ack")))))]))
 
 (define/contract (step machine now incom)
@@ -217,6 +198,25 @@
     [(incoming src (struct* message ([type 'offer] [xid (== expected-xid)])))
      #t]
     [_ #f]))
+
+(define (maybe-ack-to-bound incom now when)
+  (match incom
+    ; TODO: Handle other kinds of messages instead of assuming this is an ack
+    ; TODO: Match with chosen
+    [(incoming src msg)
+     (let ([maybe-renew (optionsf msg 'renewal-time)]
+           [maybe-rebind (optionsf msg 'rebinding-time)])
+       ; TODO: Handle 'lease-time and store it!
+       (if (and maybe-renew maybe-rebind)
+           ; TODO: Move this out of the state-machine and into the client, which needs to understand outgoing
+           ; beyond just packets to send, or provide another interface to the state machine or something (i.e. callbacks).
+           (let ([info (lease-info-from-ack msg)] )
+             (up-req (bound-state (+ when (seconds->milliseconds maybe-renew))
+                                  (+ when (seconds->milliseconds maybe-rebind))
+                                  info)
+                     (+ 5000 now)
+                     null))
+           (error "TODO: Handle malformed message by going back to init or something")))]))
 
 (module+ test
   (require rackunit)
