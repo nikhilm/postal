@@ -94,18 +94,17 @@ EOF
                [packets-to-send null])
       (define/contract (spin incom)
         ((or/c incoming? #f) . -> . void)
-        (match-define (update sm2 next-instant outgoing) (step sm (current-inexact-monotonic-milliseconds) incom))
+        (match-define (update sm2 next-instant events) (step sm (current-inexact-monotonic-milliseconds) incom))
+        (define-values (outgoing others) (partition send-msg? events))
+        ; TODO: This is a bit of a bummer right now in running a blocking action.
+        ; use async later.
+        (for ([event (in-list others)])
+          (when (iface-bind? event)
+            (let ([client-addr (lease-info-client-addr (iface-bind-info event))])
+              (log-postal-debug "Request to bind interface to ~a" client-addr)
+              (set-ip-for-device "veth1" client-addr))))
+
         ; reconcile system state if required.
-        ; TODO: Use an event from the state machine instead of inspecting state directly.
-        ; TODO: Only execute the command if the IP is not set.
-        (match (sm-current sm2)
-          [(bound-state _ _ info)
-           (log-postal-debug "IP FOR DEVICE IS ~a" (ip-for-device "veth1"))
-           ; (unless (ip-for-device "veth1")
-           (set-ip-for-device "veth1" (lease-info-client-addr info))]
-          [_ void
-             ;(error "TODO: Unset IP if set")
-             ])
         (loop sm2 (alarm-evt next-instant #t) (append packets-to-send outgoing)))
 
       (sync

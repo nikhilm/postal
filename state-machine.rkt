@@ -7,18 +7,21 @@
 (require "logger.rkt")
 (require "message.rkt")
 
-(provide step make-state-machine send-msg
+(provide step make-state-machine
+         (struct-out send-msg)
+         (struct-out iface-bind)
          (struct-out incoming)
          (struct-out update)
          (struct-out sm)
-         (struct-out lease-info)
-         (struct-out bound-state))
+         (struct-out lease-info))
 
 ; fields are ip-address?
 (struct lease-info (client-addr server-addr) #:transparent)
 
 ; outgoing event structs. to can be 'broadcast or ip-address?
 (struct send-msg (msg to) #:transparent)
+
+(struct iface-bind (info) #:transparent)
 
 ; incoming event structs
 (struct incoming (sender msg) #:transparent)
@@ -215,7 +218,8 @@
                                   (+ when (seconds->milliseconds maybe-rebind))
                                   info)
                      (+ 5000 now)
-                     null))
+                     (list
+                      (iface-bind info))))
            (error "TODO: Handle malformed message by going back to init or something")))]))
 
 (module+ test
