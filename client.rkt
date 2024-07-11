@@ -159,7 +159,6 @@ OK, few things to sort out with the design
   7a. Consider using pledge - https://justine.lol/pledge/
 8. Logging
 9. Ideally make some of this nice and interactive... somehow.
-10. Gugu
 11. Eventually perform ARP scan, although this may require raw sockets
 |#
 

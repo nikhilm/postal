@@ -46,7 +46,6 @@
 
 (struct exn:fail:parse-message exn:fail ())
 
-; TODO: Move out of this module.
 (define interface-mac-addr
   (make-parameter
    #f
@@ -97,7 +96,6 @@
     (lambda ()
       ; bootp op
       ; BOOTREQUEST
-      ; TODO: Pick based on DHCP message type.
       (write-byte 1)
       ; htype - 10mb ethernet. i see no reason to use another.
       (write-byte 1)
@@ -109,7 +107,6 @@
       (write-byte 0)
 
       ; xid
-      ; TODO: Pick sequential random numbers
       (write-integer (message-xid msg) 4 #f)
 
       ; secs
@@ -198,7 +195,6 @@
                        (format "parse: Failed to parse message. Original exception: ~a" (exn-message e))
                        (current-continuation-marks))))])
     ; bootp message type to discard
-    ; TODO: Perhaps validate against the dhcp type
     ; TODO: Fail all reads if they return eof.
     (read-byte)
 
