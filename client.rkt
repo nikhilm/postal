@@ -48,7 +48,7 @@ EOF
                    (lambda (e) (parse-failure-handler data src e))])
     (define msg (parse data))
     (log-postal-debug "Incoming message: ~a from ~v" (pretty-format msg) src)
-    (channel-put ch (incoming src msg))))
+    (channel-put ch (incoming (current-inexact-monotonic-milliseconds) src msg))))
 
 (define (make-recv-thread sock ch)
   ; note that with an unbuffered channel
@@ -94,7 +94,8 @@ EOF
                [packets-to-send null])
       (define/contract (spin incom)
         ((or/c incoming? #f) . -> . void)
-        (match-define (update sm2 next-instant events) (step sm (current-inexact-monotonic-milliseconds) incom))
+        (define-values (next-wakeup-instant events)
+          (sm (or incom (time-event (current-inexact-monotonic-milliseconds)))))
         (define-values (outgoing others) (partition send-msg? events))
         ; TODO: This is a bit of a bummer right now in running a blocking action.
         ; use async later.
@@ -105,7 +106,7 @@ EOF
               (set-ip-for-device "veth1" client-addr))))
 
         ; reconcile system state if required.
-        (loop sm2 (alarm-evt next-instant #t) (append packets-to-send outgoing)))
+        (loop sm (alarm-evt next-wakeup-instant #t) (append packets-to-send outgoing)))
 
       (sync
        (handle-evt alarm (thunk* (spin #f)))

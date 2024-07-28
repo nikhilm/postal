@@ -1,6 +1,7 @@
 #lang racket/base
 
 (require racket/contract)
+(require racket/generator)
 (require racket/list)
 (require racket/match)
 (require net/ip)
@@ -11,9 +12,8 @@
          (struct-out send-msg)
          (struct-out iface-bind)
          (struct-out incoming)
-         (struct-out update)
-         (struct-out sm)
-         (struct-out lease-info))
+         (struct-out lease-info)
+         (struct-out time-event))
 
 ; fields are ip-address?
 (struct lease-info (client-addr server-addr) #:transparent)
@@ -24,7 +24,156 @@
 (struct iface-bind (info) #:transparent)
 
 ; incoming event structs
-(struct incoming (sender msg) #:transparent)
+; incoming needs a time, so the machine knows when packets came in
+(struct incoming (now sender msg) #:transparent)
+(struct time-event (now) #:transparent)
+
+; generator based attempt
+(define xid (make-parameter 0))
+(define (next-xid!)
+  (xid (add1 (xid)))
+  (xid))
+
+(define (make-state-machine)
+  ; should return a generator
+  (generator (event)
+             (parameterize ([xid 0])
+               ; assume in initial state, although later we want to support starting from rebooting etc.
+               ; could do that by accept formals in the generator
+               ; need to figure out a better way to enter the right initial state.
+               (match-let ([(time-event now) event])
+                 (to-selecting-state now)))))
+
+(define (requesting-timeout-instant n)
+  (+ 10000 n))
+
+(define (to-selecting-state now)
+  (define (maybe-offer-list incom expected-xid)
+    (if (reasonable-offer? incom expected-xid)
+        (begin (log-postal-debug "considered reasonable ~a" incom)
+               (list incom))
+        null))
+
+  (define timeout (+ 10000 now))
+  (define xid (next-xid!))
+  (let loop ([offers null]
+             [outgoing-events (list (send-msg (make-dhcpdiscover xid) 'broadcast))])
+    ; one of the tiny edge cases here is that the outgoing DHCPDISCOVER may not actually get
+    ; sent right away, in which case the timeout is not allowing a full 10 seconds for discovery.
+    (match (yield timeout outgoing-events)
+      [(time-event now)
+       (if offers
+
+           (to-requesting-state now (first offers))
+
+           ; TODO: Client should probably retry, and this needs to indicate that somehow.
+           (error "Need to handle not getting any offers"))]
+      [(and (incoming _ _ _) incom)
+       ; accumulate offers, nothing to send.
+       (loop (append offers (maybe-offer-list incom xid)) null)])
+    ))
+
+(define (to-requesting-state when offer)
+  (define timeout (requesting-timeout-instant when))
+  (define event (yield timeout
+                       (list (send-msg (request-from-offer
+                                        ; TODO: Save the xid in the requesting-state so that the ack can be matched
+                                        (next-xid!) offer) 'broadcast))))
+
+  (match event
+    [(time-event now) #:when (>= now timeout)
+                      (error "Handle not receiving ack")]
+    ; want to yield just a timeout and wait.
+    [(time-event now) (error "TODO")]
+    [(and (incoming _ _ _) incom)
+     (maybe-ack-to-bound2 incom when)]))
+
+(define (step machine now incoming)
+  ; should assume machine is a generator stopped at a yield for now + incoming
+  ; so it can just apply
+  (machine now incoming))
+
+(define (maybe-ack-to-bound2 incom when)
+  (match incom
+    ; TODO: Handle other kinds of messages instead of assuming this is an ack
+    ; TODO: Match with chosen
+    [(incoming in-time src msg)
+     (let ([maybe-renew (optionsf msg 'renewal-time)]
+           [maybe-rebind (optionsf msg 'rebinding-time)])
+       ; TODO: Handle 'lease-time and store it!
+       (if (and maybe-renew maybe-rebind)
+           (let ([info (lease-info-from-ack msg)]
+                 [renew-instant (+ when (seconds->milliseconds maybe-renew))]
+                 [rebind-instant (+ when (seconds->milliseconds maybe-rebind))])
+             (to-bound-state info renew-instant rebind-instant))
+           (error "TODO: Handle malformed message by going back to init or something")))]))
+
+(define (to-bound-state info renew-instant rebind-instant)
+  ; for now, hang out in bound forever.
+  (let loop ([next-instant renew-instant]
+             [outgoing (list (iface-bind info))])
+    (match (yield next-instant outgoing)
+      [(time-event now)
+       (log-postal-warning "Looping forever in bound state!")
+       (loop (+ 5000 now) null)]
+      [_ (error "Don't know what to do with a packet when in bound.")])))
+
+(define (lease-info-from-ack msg)
+  (unless (eq? (message-type msg) 'ack)
+    (error "Not a DHCPACK message"))
+
+  (lease-info (message-yiaddr msg)
+              (optionsf msg 'server-identifier)))
+
+(define (seconds->milliseconds sec)
+  (* 1000 sec))
+
+(define (reasonable-offer? incom expected-xid)
+  (match incom
+    [(incoming _ src (struct* message ([type 'offer] [xid (== expected-xid)])))
+     #t]
+    [_ #f]))
+
+(define (request-from-offer xid offer)
+  (match-let ([(struct incoming (_ sender msg)) offer])
+    (message 'request
+             xid
+             ; TODO: secs, should be the same as discover
+             0
+             (number->ipv4-address 0)
+             (number->ipv4-address 0)
+             (number->ipv4-address 0)
+             (number->ipv4-address 0)
+             (list (message-option 50 (message-yiaddr msg))
+                   (message-option 54 sender)))))
+
+(define (request-to-server xid ciaddr)
+  #|
+  DHCPREQUEST generated during RENEWING state:
+
+      'server identifier' MUST NOT be filled in, 'requested IP address'
+      option MUST NOT be filled in, 'ciaddr' MUST be filled in with
+      client's IP address. In this situation, the client is completely
+      configured, and is trying to extend its lease. This message will
+      be unicast, so no relay agents will be involved in its
+      transmission.  Because 'giaddr' is therefore not filled in, the
+      DHCP server will trust the value in 'ciaddr', and use it when
+      replying to the client.
+
+      A client MAY choose to renew or extend its lease prior to T1.  The
+      server may choose not to extend the lease (as a policy decision by
+      the network administrator), but should return a DHCPACK message
+      regardless.
+  |#
+  (message 'request
+           xid
+           0
+           ciaddr
+           (number->ipv4-address 0)
+           (number->ipv4-address 0)
+           (number->ipv4-address 0)
+           null))
+#|
 (struct update (sm next-timeout-instant outgoing) #:transparent)
 
 ; states
@@ -146,61 +295,6 @@
    machine
    (step-internal machine now incom)))
 
-(define (request-from-offer xid offer)
-  (match-let ([(struct incoming (sender msg)) offer])
-    (message 'request
-             xid
-             ; TODO: secs, should be the same as discover
-             0
-             (number->ipv4-address 0)
-             (number->ipv4-address 0)
-             (number->ipv4-address 0)
-             (number->ipv4-address 0)
-             (list (message-option 50 (message-yiaddr msg))
-                   (message-option 54 sender)))))
-
-(define (request-to-server xid ciaddr)
-  #|
-  DHCPREQUEST generated during RENEWING state:
-
-      'server identifier' MUST NOT be filled in, 'requested IP address'
-      option MUST NOT be filled in, 'ciaddr' MUST be filled in with
-      client's IP address. In this situation, the client is completely
-      configured, and is trying to extend its lease. This message will
-      be unicast, so no relay agents will be involved in its
-      transmission.  Because 'giaddr' is therefore not filled in, the
-      DHCP server will trust the value in 'ciaddr', and use it when
-      replying to the client.
-
-      A client MAY choose to renew or extend its lease prior to T1.  The
-      server may choose not to extend the lease (as a policy decision by
-      the network administrator), but should return a DHCPACK message
-      regardless.
-  |#
-  (message 'request
-           xid
-           0
-           ciaddr
-           (number->ipv4-address 0)
-           (number->ipv4-address 0)
-           (number->ipv4-address 0)
-           null))
-
-(define (lease-info-from-ack msg)
-  (unless (eq? (message-type msg) 'ack)
-    (error "Not a DHCPACK message"))
-
-  (lease-info (message-yiaddr msg)
-              (optionsf msg 'server-identifier)))
-
-(define (seconds->milliseconds sec)
-  (* 1000 sec))
-
-(define (reasonable-offer? incom expected-xid)
-  (match incom
-    [(incoming src (struct* message ([type 'offer] [xid (== expected-xid)])))
-     #t]
-    [_ #f]))
 
 (define (maybe-ack-to-bound incom now when)
   (match incom
@@ -322,3 +416,4 @@
                              (lease-info client server))
                 (and (equal? client (make-ip-address "172.16.1.182"))
                      (equal? server (make-ip-address "172.16.1.1"))))))
+|#

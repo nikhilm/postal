@@ -32,7 +32,7 @@ ip netns exec dhcp-test-client ip link set veth1 address 00:11:22:33:44:55
 ip netns exec dhcp-test-client ip link set dev veth1 up
 ip netns exec dhcp-test-client ip route add default dev veth1
 # ip netns exec dhcp-test-client /bin/bash
-PLTSTDERR="error debug@postal" ip netns exec dhcp-test-client /home/nikhil/racket-8.12/bin/racket -A /home/nikhil/.local/share/racket/ main.rkt
+PLTSTDERR="error debug@postal" ip netns exec dhcp-test-client /home/nikhil/racket-8.12/bin/racket -A /home/nikhil/.local/share/racket/ -l errortrace -t main.rkt
 
 # Clean up
 ip netns delete dhcp-test-server 2>/dev/null || true
