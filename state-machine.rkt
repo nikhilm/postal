@@ -31,13 +31,14 @@
 ; generator based attempt
 (define xid (make-parameter 0))
 (define (next-xid!)
-  (xid (add1 (xid)))
-  (xid))
+  (let ([ret (xid)])
+    (xid (add1 (xid)))
+    ret))
 
-(define (make-state-machine)
+(define (make-state-machine #:xid [start-xid 0])
   ; should return a generator
   (generator (event)
-             (parameterize ([xid 0])
+             (parameterize ([xid start-xid])
                ; assume in initial state, although later we want to support starting from rebooting etc.
                ; could do that by accept formals in the generator
                ; need to figure out a better way to enter the right initial state.
@@ -58,23 +59,24 @@
   (define xid (next-xid!))
   (let loop ([offers null]
              [outgoing-events (list (send-msg (make-dhcpdiscover xid) 'broadcast))])
+    (log-postal-debug "selecting loop with offers ~a og ~a~n" offers outgoing-events)
     ; one of the tiny edge cases here is that the outgoing DHCPDISCOVER may not actually get
     ; sent right away, in which case the timeout is not allowing a full 10 seconds for discovery.
     (match (yield timeout outgoing-events)
       [(time-event now)
+       (log-postal-debug "time-evt ~a~n" now)
        (if offers
-
            (to-requesting-state now (first offers))
-
            ; TODO: Client should probably retry, and this needs to indicate that somehow.
            (error "Need to handle not getting any offers"))]
       [(and (incoming _ _ _) incom)
+       (log-postal-debug "incoming ~a~n" incom)
        ; accumulate offers, nothing to send.
-       (loop (append offers (maybe-offer-list incom xid)) null)])
-    ))
+       (loop (append offers (maybe-offer-list incom xid)) null)])))
 
 (define (to-requesting-state when offer)
   (define timeout (requesting-timeout-instant when))
+  ; TODO: Propagate the current now via requesting to bound, since t1 and t2 are calculated from there
   (define event (yield timeout
                        (list (send-msg (request-from-offer
                                         ; TODO: Save the xid in the requesting-state so that the ack can be matched
@@ -86,14 +88,14 @@
     ; want to yield just a timeout and wait.
     [(time-event now) (error "TODO")]
     [(and (incoming _ _ _) incom)
-     (maybe-ack-to-bound2 incom when)]))
+     (maybe-ack-to-bound incom when)]))
 
 (define (step machine now incoming)
   ; should assume machine is a generator stopped at a yield for now + incoming
   ; so it can just apply
   (machine now incoming))
 
-(define (maybe-ack-to-bound2 incom when)
+(define (maybe-ack-to-bound incom when)
   (match incom
     ; TODO: Handle other kinds of messages instead of assuming this is an ack
     ; TODO: Match with chosen
@@ -174,90 +176,11 @@
            (number->ipv4-address 0)
            null))
 #|
-(struct update (sm next-timeout-instant outgoing) #:transparent)
-
-; states
-(struct state () #:transparent)
-(struct init-state state () #:transparent)
-(struct selecting-state state (offers timeout expected-xid) #:transparent)
-(struct requesting-state (chosen timeout when) #:transparent)
 ; TODO: Put the lease information here since it is required for renewal.
 ; Likely will need to pull out into another struct.
 ; what is a good way to manage these towers of structs?
 (struct bound-state (renew rebind info) #:transparent)
 (struct renewing-state (when rebind info) #:transparent)
-
-(struct sm (current xid) #:transparent)
-
-; this is the sort of thing that would be nice to not have to carry around everywhere
-; TODO: Randomize xid
-(define (make-state-machine #:current [current (init-state)] #:xid [xid 0])
-  (sm current xid))
-
-(define (next-xid xid)
-  (modulo (add1 xid) 4294967295))
-
-(struct up-req (new-state timeout outgoing) #:transparent)
-
-(define/match (update-machine machine req)
-  ; TODO: Probably a more succinct way to write this.
-  ; Only bump the xid if there are outgoing messages
-  [((sm _ xid) (up-req new-state timeout outgoing)) (define nxid (if (null? outgoing) xid (next-xid xid)))
-                                                    (update (sm new-state nxid)
-                                                            timeout outgoing)])
-
-; unlike OOP 2 functions for stuff (one to send in new data, one to receive events)
-; i think we may be able to get away with just one, as long as we pass around some stuff internally.
-; -> update
-(define/contract (step-internal machine now incom)
-  (sm? real? (or/c incoming? #f) . -> . up-req?)
-  (match (sm-current machine)
-    [(init-state) (up-req
-                   ; TODO: Jitter the timeout
-                   (selecting-state null (+ 10000 now) (sm-xid machine))
-                   (+ 10000 now)
-                   (list (send-msg (make-dhcpdiscover (sm-xid machine)) 'broadcast)))]
-
-    ; TODO: Response xid validation.
-    [(selecting-state offers timeout expected-xid)
-     (if (>= now timeout)
-         (if offers
-             (up-req
-              ; TODO: Jitter the timeout
-              ; It is quite possible for the client to not send out the request offer "right away" relative to `now`
-              ; but it seems pretty unlikely in practice.
-              (requesting-state (first offers) (+ 10000 now) now)
-              ; if the server does not respond within this time, we need to do more stuff
-              ; TODO: Handle this case
-              (+ 10000 now)
-              ; TODO: Set options requested IP and server identifier
-              ; TODO: Propagate the current now via requesting to bound, since t1 and t2 are calculated from there
-              (list (send-msg (request-from-offer
-                               ; TODO: Save the xid in the requesting-state so that the ack can be matched
-                               (sm-xid machine) (first offers)) 'broadcast)))
-             ; TODO: Client should probably retry, and this needs to indicate that somehow.
-             (error "Need to handle this state"))
-
-         (if (reasonable-offer? incom expected-xid)
-             (begin
-               (log-postal-debug "considered reasonable ~a" incom)
-               (up-req
-                ; TODO: Validate that the incoming packet is a offer
-                (selecting-state (append offers (list incom)) timeout expected-xid)
-                timeout
-                null))
-             (begin
-               (log-postal-warning "Dropping incoming ~a since it is not reasonable." incom)
-               (up-req (selecting-state offers timeout expected-xid)
-                       timeout
-                       null))))]
-
-    [(requesting-state chosen timeout when)
-     ; TODO: Since this timeout is relative to when, but not dependent on the server response the struct doesn't need to store it.
-     (if (>= now timeout)
-         (error 'step "TODO: Handle not receiving ack")
-
-         (maybe-ack-to-bound incom now when))]
 
     [(and orig-state (bound-state renew-instant rebind-instant info))
      (cond
@@ -289,32 +212,7 @@
                 (maybe-ack-to-bound incom now when)
                 (error "Need to handle not an ack")))))]))
 
-(define/contract (step machine now incom)
-  (sm? real? (or/c incoming? #f) . -> . update?)
-  (update-machine
-   machine
-   (step-internal machine now incom)))
-
-
-(define (maybe-ack-to-bound incom now when)
-  (match incom
-    ; TODO: Handle other kinds of messages instead of assuming this is an ack
-    ; TODO: Match with chosen
-    [(incoming src msg)
-     (let ([maybe-renew (optionsf msg 'renewal-time)]
-           [maybe-rebind (optionsf msg 'rebinding-time)])
-       ; TODO: Handle 'lease-time and store it!
-       (if (and maybe-renew maybe-rebind)
-           ; TODO: Move this out of the state-machine and into the client, which needs to understand outgoing
-           ; beyond just packets to send, or provide another interface to the state machine or something (i.e. callbacks).
-           (let ([info (lease-info-from-ack msg)] )
-             (up-req (bound-state (+ when (seconds->milliseconds maybe-renew))
-                                  (+ when (seconds->milliseconds maybe-rebind))
-                                  info)
-                     (+ 5000 now)
-                     (list
-                      (iface-bind info))))
-           (error "TODO: Handle malformed message by going back to init or something")))]))
+|#
 
 (module+ test
   (require rackunit)
@@ -323,29 +221,21 @@
   (define (canonical-server-ip)
     (make-ip-address "192.168.11.1"))
 
-  (define (extract-option msg tag)
-    (findf
-     (lambda (opt)
-       (equal? (message-option-tag opt) tag))
-     (message-options msg)))
+  (define (extract-option options tag)
+    (findf (lambda (opt)
+             (equal? (message-option-tag opt) tag))
+           options))
 
-  (define (wrap-message msg [sender (canonical-server-ip)])
-    (incoming sender msg))
-
-  (define (multi-step sm steps)
-    ; step sm by applying each entry in steps.
-    ; return the final update
-    (for/fold ([upd (update sm 0 #f)])
-              ([step-args (in-list steps)])
-      (apply step (update-sm upd) step-args)))
+  (define (wrap-message now msg [sender (canonical-server-ip)])
+    (incoming now sender msg))
 
   (test-case
    "Starting in init leads to a request to send DHCPDISCOVER"
    (define s (make-state-machine))
    ; no input required
-   (match-define (update _ _ (list next-event)) (step s 0 #f))
-   (check-match next-event
-                (send-msg message to)
+   (define-values (_ events) (s (time-event 0)))
+   (check-match events
+                (list (send-msg message to))
                 (and (equal? (message-type message) 'discover)
                      (equal? to 'broadcast))))
 
@@ -353,25 +243,24 @@
   ; while getting the machine to that state.
   (test-case
    "When in selecting, offers are considered for 10 seconds"
-   (define stepped
-     (multi-step (make-state-machine #:xid 34)
-                 (list '(7 #f)
-                       `(8000 ,(wrap-message (message 'offer
-                                                      34
-                                                      0
-                                                      (number->ipv4-address 0)
-                                                      (number->ipv4-address 0)
-                                                      (number->ipv4-address 0)
-                                                      (number->ipv4-address 0)
-                                                      null)))
-                       '(11000 #f))))
-   ; probably should use some check form that prints each substep diff
-   (check-match (first (update-outgoing stepped))
-                (send-msg message to)
-                (and (equal? (message-type message) 'request)
-                     (equal? to 'broadcast)
-                     (equal? (message-option-value (extract-option message 54))
-                             (canonical-server-ip)))))
+   (define s (make-state-machine #:xid 34))
+   (s (time-event 7))
+   (let-values ([(_ events) (s (wrap-message 8000 (message 'offer
+                                                           34
+                                                           0
+                                                           (number->ipv4-address 0)
+                                                           (number->ipv4-address 0)
+                                                           (number->ipv4-address 0)
+                                                           (number->ipv4-address 0)
+                                                           null)))])
+     (check-equal? events null))
+
+   (let-values ([(_ events) (s (time-event 11000))])
+     (check-match events
+                  (list (send-msg (struct* message ([type 'request] [options opts])) 'broadcast))
+                  (equal? (message-option-value (extract-option opts 54))
+                          (canonical-server-ip))))))
+#|
 
   (test-case
    "An offer with a non-matching xid is ignored."
