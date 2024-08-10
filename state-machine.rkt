@@ -259,24 +259,24 @@
      (check-match events
                   (list (send-msg (struct* message ([type 'request] [options opts])) 'broadcast))
                   (equal? (message-option-value (extract-option opts 54))
-                          (canonical-server-ip))))))
-#|
+                          (canonical-server-ip)))))
 
   (test-case
    "An offer with a non-matching xid is ignored."
-   ; start xid at 34 and then send something lower.
-   (define stepped
-     (multi-step (make-state-machine #:current (selecting-state null 10000 34) #:xid 34)
-                 (list `(4000 ,(wrap-message (message 'offer
-                                                      72
-                                                      0
-                                                      (number->ipv4-address 0)
-                                                      (number->ipv4-address 0)
-                                                      (number->ipv4-address 0)
-                                                      (number->ipv4-address 0)
-                                                      null))))))
-   (check-exn exn:fail? (lambda () (step (update-sm stepped) 11000 #f))))
+   (define s (make-state-machine #:xid 34))
+   (s (time-event 7))
+   (s (wrap-message 4000 (message 'offer
+                                  72
+                                  0
+                                  (number->ipv4-address 0)
+                                  (number->ipv4-address 0)
+                                  (number->ipv4-address 0)
+                                  (number->ipv4-address 0)
+                                  null)))
+   ; TODO: Once the machine handles this a bit gracefully, fix this.
+   (check-exn exn:fail? (lambda () (s (time-event 11000))))))
 
+#|
   (test-case
    "Handle transition to bound"
    (define sm (make-state-machine #:current (requesting-state #f 10 1000) #:xid 23))
