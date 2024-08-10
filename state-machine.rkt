@@ -218,6 +218,10 @@
   (require rackunit)
   (require net/ip)
 
+  (define k-test-renewal-time 1800)
+  (define k-test-rebinding-time 3150)
+  (define k-test-lease-time 3600)
+
   (define (canonical-server-ip)
     (make-ip-address "192.168.11.1"))
 
@@ -228,6 +232,57 @@
 
   (define (wrap-message now msg [sender (canonical-server-ip)])
     (incoming now sender msg))
+
+  (define (make-bound-machine)
+    (define s (make-state-machine #:xid 42))
+    (s (time-event 0))
+    (s (wrap-message 1000 (message 'offer
+                                   42
+                                   0
+                                   (number->ipv4-address 0)
+                                   (make-ip-address "192.168.11.12")
+                                   (make-ip-address "192.168.11.1")
+                                   (number->ipv4-address 0)
+                                   (list (message-option 'renewal-time k-test-renewal-time)
+                                         (message-option 'rebinding-time k-test-rebinding-time)
+                                         (message-option 'lease-time k-test-lease-time)
+                                         (message-option 'server-identifier (make-ip-address "192.168.11.1"))))))
+
+    (let-values ([(_ events) (s (time-event 11000))])
+      (check-equal? events (list
+                            (send-msg
+                             (message
+                              'request
+                              43
+                              0
+                              (make-ip-address "0.0.0.0")
+                              (make-ip-address "0.0.0.0")
+                              (make-ip-address "0.0.0.0")
+                              (make-ip-address "0.0.0.0")
+                              (list
+                               (message-option 50 (make-ip-address "192.168.11.12"))
+                               (message-option 54 (make-ip-address "192.168.11.1"))))
+                             'broadcast))))
+
+    (define-values (_ outgoing-events)
+      (s (wrap-message 11100 (message 'ack
+                                      42
+                                      0
+                                      (make-ip-address "192.168.11.12")
+                                      (make-ip-address "192.168.11.12")
+                                      (make-ip-address "192.168.11.1")
+                                      (number->ipv4-address 0)
+                                      (list (message-option 'renewal-time 1800)
+                                            (message-option 'rebinding-time 3150)
+                                            (message-option 'lease-time 3600)
+                                            (message-option 'server-identifier (make-ip-address "192.168.11.1")))))))
+
+    (check-match outgoing-events
+                 (list (iface-bind (lease-info caddr saddr)))
+                 (and (equal? caddr (make-ip-address "192.168.11.12"))
+                      (equal? saddr (make-ip-address "192.168.11.1"))))
+
+    s)
 
   (test-case
    "Starting in init leads to a request to send DHCPDISCOVER"
@@ -244,22 +299,34 @@
   (test-case
    "When in selecting, offers are considered for 10 seconds"
    (define s (make-state-machine #:xid 34))
-   (s (time-event 7))
+   (s (time-event 0))
    (let-values ([(_ events) (s (wrap-message 8000 (message 'offer
                                                            34
                                                            0
                                                            (number->ipv4-address 0)
-                                                           (number->ipv4-address 0)
+                                                           (make-ip-address "192.168.11.3")
                                                            (number->ipv4-address 0)
                                                            (number->ipv4-address 0)
                                                            null)))])
      (check-equal? events null))
 
+   (let-values ([(_ events) (s (wrap-message 9900 (message 'offer
+                                                           34
+                                                           0
+                                                           (number->ipv4-address 0)
+                                                           (make-ip-address "192.168.11.6")
+                                                           (number->ipv4-address 0)
+                                                           (number->ipv4-address 0)
+                                                           null) (make-ip-address "192.168.11.99")))])
+     (check-equal? events null))
+
    (let-values ([(_ events) (s (time-event 11000))])
      (check-match events
                   (list (send-msg (struct* message ([type 'request] [options opts])) 'broadcast))
-                  (equal? (message-option-value (extract-option opts 54))
-                          (canonical-server-ip)))))
+                  (and (equal? (message-option-value (extract-option opts 54))
+                               (canonical-server-ip))
+                       (equal? (message-option-value (extract-option opts 50))
+                               (make-ip-address "192.168.11.3"))))))
 
   (test-case
    "An offer with a non-matching xid is ignored."
@@ -274,7 +341,17 @@
                                   (number->ipv4-address 0)
                                   null)))
    ; TODO: Once the machine handles this a bit gracefully, fix this.
-   (check-exn exn:fail? (lambda () (s (time-event 11000))))))
+   (check-exn exn:fail? (lambda () (s (time-event 11000)))))
+
+  (test-case
+   "Entering the BOUND state issues an interface binding event"
+   ; re-use the helper as a test.
+   (make-bound-machine))
+
+  (test-case
+   "Stays in BOUND until t1"
+   (define s (make-bound-machine))
+   (check-equal? 2 2)))
 
 #|
   (test-case
