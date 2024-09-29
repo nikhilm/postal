@@ -111,14 +111,31 @@
            (error "TODO: Handle malformed message by going back to init or something")))]))
 
 (define (to-bound-state info renew-instant rebind-instant)
-  ; for now, hang out in bound forever.
-  (let loop ([next-instant renew-instant]
-             [outgoing (list (iface-bind info))])
-    (match (yield next-instant outgoing)
+  ((bound-state info renew-instant rebind-instant) (yield renew-instant (list (iface-bind info)))))
+
+(define ((bound-state info renew-instant rebind-instant) first-incom)
+  (let loop ([incoming-event first-incom])
+    (match incoming-event
       [(time-event now)
-       (log-postal-warning "Looping forever in bound state!")
-       (loop (+ 5000 now) null)]
+       (cond
+         [(> now renew-instant)
+          (to-renewing-state info now rebind-instant)]
+         [else (log-postal-debug "Hanging out in bound until timer expires") (loop (yield (+ 5000 now) null))])]
       [_ (error "Don't know what to do with a packet when in bound.")])))
+
+(define (to-renewing-state info request-instant rebind-instant)
+  (define next-evt (yield rebind-instant (renew-request info (next-xid!))))
+  (log-postal-debug "next-evt in renewing state ~a" next-evt))
+
+(define (renew-request info xid)
+  (list (send-msg (message 'request
+        xid
+        0
+        (lease-info-client-addr info)
+        (number->ipv4-address 0)
+        (number->ipv4-address 0)
+        (number->ipv4-address 0)
+        null) (lease-info-server-addr info))))
 
 (define (lease-info-from-ack msg)
   (unless (eq? (message-type msg) 'ack)
@@ -349,9 +366,22 @@
    (make-bound-machine))
 
   (test-case
-   "Stays in BOUND until t1"
+   "Once t1 expires, a (unicast) DHCPREQUEST is sent"
    (define s (make-bound-machine))
-   (check-equal? 2 2)))
+   (define renewal-ms (seconds->milliseconds k-test-renewal-time))
+   ; the setup step made the transition to bound at 11100.
+   ; no events until the renewal time.
+   (for ([time-delta-ms (in-range 0 renewal-ms (seconds->milliseconds 100))])
+     (let-values ([(_ events) (s (time-event (+ 11100 time-delta-ms)))])
+       (check-true (empty? events))))
+   ; now, renew.
+   (let-values ([(_ events) (s (time-event (+ 11100 renewal-ms)))])
+     (check-match events
+                  (list (send-msg (struct* message ([type 'request])) (== (canonical-server-ip)))))))
+
+  #;(test-case
+     "DHCPOFFER/ACK/NACK are discarded in BOUND state"
+     (fail "TODO")))
 
 #|
   (test-case
