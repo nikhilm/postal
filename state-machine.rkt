@@ -277,10 +277,12 @@
                                             (message-option 'lease-time 3600)
                                             (message-option 'server-identifier (make-ip-address "192.168.11.1")))))))
 
-    (check-match outgoing-events
-                 (list (iface-bind (lease-info caddr saddr)))
-                 (and (equal? caddr (make-ip-address "192.168.11.12"))
-                      (equal? saddr (make-ip-address "192.168.11.1"))))
+     (check-match outgoing-events
+                 (list
+                  (iface-bind
+                   (lease-info
+                    (== (make-ip-address "192.168.11.12"))
+                    (== (make-ip-address "192.168.11.1"))))))
 
     s)
 
@@ -290,9 +292,7 @@
    ; no input required
    (define-values (_ events) (s (time-event 0)))
    (check-match events
-                (list (send-msg message to))
-                (and (equal? (message-type message) 'discover)
-                     (equal? to 'broadcast))))
+                (list (send-msg (struct* message ([type 'discover])) 'broadcast))))
 
   ; will need to figure out how to test intermediate states
   ; while getting the machine to that state.
