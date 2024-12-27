@@ -103,7 +103,9 @@ EOF
           (when (iface-bind? event)
             (let ([client-addr (lease-info-client-addr (iface-bind-info event))])
               (log-postal-debug "Request to bind interface to ~a" client-addr)
-              (set-ip-for-device "veth1" client-addr))))
+              (set-ip-for-device "veth1" client-addr)))
+          (when (iface-unbind? event)
+            (error "TODO")))
 
         ; reconcile system state if required.
         (loop sm (alarm-evt next-wakeup-instant #t) (append packets-to-send outgoing)))
