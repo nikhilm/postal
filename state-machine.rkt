@@ -79,7 +79,6 @@
     ; sent right away, in which case the timeout is not allowing a full 10 seconds for discovery.
     (match incoming-event
       [(time-event now)
-       (log-postal-debug "time-evt ~a~n" now)
        (if (empty? offers)
            ; TODO: Client should probably retry, and this needs to indicate that somehow.
            (error "Need to handle not getting any offers")
@@ -145,14 +144,14 @@
   ; before retransmitting the DHCP request.".
   (define request-xid (next-xid!))
   (define next-evt (yield rebind-instant (renew-request info request-xid)))
-  (log-postal-debug "next-evt in renewing state ~a" next-evt)
+  (log-postal-debug "next-evt when transitioning to renewing state ~a" next-evt)
   ((renewing-state info rebind-instant request-instant request-xid) next-evt))
 
 (define ((renewing-state info rebind-instant request-instant request-xid) first-incom)
   (let loop ([incoming-event first-incom])
     (match incoming-event
       [(time-event now) #:when (> now rebind-instant)
-                        (error "TODO rebinding state transition")]
+                        (to-rebinding-state info now)]
       [(time-event now)
        ; TODO: Handle occasionally sending out DHCPREQUEST.
        (loop (yield rebind-instant null))]
@@ -161,9 +160,33 @@
        ((init-state) (yield (+ 2000 now) (list (iface-unbind))))]
       [(incoming _ sender (and msg (struct* message ([type 'ack] [xid (== request-xid)]))))
        ; TODO Perform additional validation on the sender. plus yiaddr should match the original ciaddr.
+       ; TODO: There is a flaw here. Using maybe-ack-to-bound results in an iface-bind event to the caller.
+       ; However, since this is a renewal, the client is already bound.
        (maybe-ack-to-bound incoming-event request-instant)]
       [other (log-postal-debug "renaming-state: Ignoring event ~a" other)])))
 
+(define (to-rebinding-state info request-instant)
+  (define request-xid (next-xid!))
+  (define next-evt (yield (+ 10000 request-instant) (rebind-request info request-xid)))
+  (log-postal-debug "next-evt when transitioning to rebinding state ~a" next-evt)
+  ((rebinding-state info request-instant request-xid) next-evt))
+
+; TODO: It seems like renewing and rebinding states have the same logic with slight differences. See what can be refactored.
+(define ((rebinding-state info request-instant request-xid) first-incom)
+  (let loop ([incoming-event first-incom])
+    (match incoming-event
+      [(time-event now) #:when (> now (+ 10000 request-instant)) (error "TODO Handle retries and timeouts")]
+      [(time-event now) (error "Handle retries and timeouts")]
+      [(incoming now sender (and msg (struct* message ([type 'nak] [xid (== request-xid)]))))
+       ; TODO Perform additional validation on the sender.
+       ((init-state) (yield (+ 2000 now) (list (iface-unbind))))]
+      [(incoming _ sender (and msg (struct* message ([type 'ack] [xid (== request-xid)]))))
+       ; TODO Perform additional validation on the sender. plus yiaddr should match the original ciaddr.
+       ; TODO: There is a flaw here. Using maybe-ack-to-bound results in an iface-bind event to the caller.
+       ; However, since this is a renewal, the client is already bound.
+       (maybe-ack-to-bound incoming-event request-instant)])))
+
+; TODO: Refactor with rebind-request
 (define (renew-request info xid)
   (list (send-msg (message 'request
                            xid
@@ -173,6 +196,16 @@
                            (number->ipv4-address 0)
                            (number->ipv4-address 0)
                            null) (lease-info-server-addr info))))
+
+(define (rebind-request info xid)
+  (list (send-msg (message 'request
+                           xid
+                           0
+                           (lease-info-client-addr info)
+                           (number->ipv4-address 0)
+                           (number->ipv4-address 0)
+                           (number->ipv4-address 0)
+                           null) 'broadcast)))
 
 (define (lease-info-from-ack msg)
   (unless (eq? (message-type msg) 'ack)
@@ -379,8 +412,18 @@
      (check-match events
                   (list (send-msg (struct* message ([type 'request])) (== canonical-server-ip))))))
 
-  #;(test-case
-     "When in renewing, if enough time has elapsed, rebinding is triggered")
+  (test-case
+   "When in renewing, if enough time has elapsed, rebinding is triggered"
+   (define s (make-state-machine #:xid 42
+                                 #:start-state (renewing-state
+                                                (lease-info (make-ip-address "192.168.11.12")
+                                                            (make-ip-address "192.168.11.1"))
+                                                3000
+                                                1000
+                                                42)))
+   (define-values (_ outgoing-events) (s (time-event 3200)))
+   (check-match outgoing-events
+                (list (send-msg (struct* message ([type 'request])) 'broadcast))))
 
   #;(test-case
      "When in renewing, renewal is re-attempted periodically")
@@ -420,6 +463,61 @@
                                                 42)))
 
    (define-values (_ outgoing-events) (s (incoming 2000 canonical-server-ip
+                                                   (message
+                                                    'ack
+                                                    42
+                                                    1432
+                                                    (make-ip-address "192.168.11.12")
+                                                    (make-ip-address "192.168.11.12")
+                                                    (number->ipv4-address 0)
+                                                    (number->ipv4-address 0)
+                                                    (list (message-option 'renewal-time 17000)
+                                                          (message-option 'rebinding-time 34500)
+                                                          (message-option 'lease-time 3600)
+                                                          (message-option 'server-identifier canonical-server-ip))))))
+   (check-match outgoing-events
+                (list
+                 (iface-bind
+                  (lease-info
+                   (== (make-ip-address "192.168.11.12"))
+                   (== (make-ip-address "192.168.11.1")))))))
+
+  #;(test-case
+     "When in rebinding, rebinding is re-attempted periodically")
+
+  #;(test-case
+     "When in rebinding, unexpected packets are ignored")
+
+  (test-case
+   "When in rebinding, a nak leads to reset"
+   (define s (make-state-machine #:xid 42
+                                 #:start-state (rebinding-state
+                                                (lease-info (make-ip-address "192.168.11.12")
+                                                            (make-ip-address "192.168.11.1"))
+                                                1000
+                                                42)))
+   (define-values (_ outgoing-events) (s (incoming 1100 canonical-server-ip
+                                                   (message
+                                                    'nak
+                                                    42
+                                                    1432
+                                                    (number->ipv4-address 0)
+                                                    (number->ipv4-address 0)
+                                                    (number->ipv4-address 0)
+                                                    (number->ipv4-address 0)
+                                                    (list (message-option 'server-identifier canonical-server-ip))))))
+   (check-match outgoing-events (list (iface-unbind))))
+
+  (test-case
+   "When in rebinding, an ack moves back to bound"
+   (define s (make-state-machine #:xid 42
+                                 #:start-state (rebinding-state
+                                                (lease-info (make-ip-address "192.168.11.12")
+                                                            (make-ip-address "192.168.11.1"))
+                                                1000
+                                                42)))
+
+   (define-values (_ outgoing-events) (s (incoming 1100 canonical-server-ip
                                                    (message
                                                     'ack
                                                     42
