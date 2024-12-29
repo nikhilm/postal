@@ -81,7 +81,7 @@ EOF
   ; TODO: The protocol assumes packets are reliably delivered.
   ; Should SELECTING fall back to INIT if no packets arrive
   ; for example, with some cap on retries.
-  (define sock (udp-open-socket))
+  (define sock (udp-open-socket #f 68))
   (udp-bind! sock #f 68 #t)
 
   (define ch (make-channel))
