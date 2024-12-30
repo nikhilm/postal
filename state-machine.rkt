@@ -143,7 +143,7 @@
   ; TODO: Should actually wait "one half of the remaining time until T2 [...] down to a minimum of 60 seconds,
   ; before retransmitting the DHCP request.".
   (define request-xid (next-xid!))
-  (define next-evt (yield rebind-instant (renew-request info request-xid)))
+  (define next-evt (yield rebind-instant (list (send-msg (request-from-lease info request-xid) (lease-info-server-addr info)))))
   (log-postal-debug "next-evt when transitioning to renewing state ~a" next-evt)
   ((renewing-state info rebind-instant request-instant request-xid) next-evt))
 
@@ -167,7 +167,7 @@
 
 (define (to-rebinding-state info request-instant)
   (define request-xid (next-xid!))
-  (define next-evt (yield (+ 10000 request-instant) (rebind-request info request-xid)))
+  (define next-evt (yield (+ 10000 request-instant) (list (send-msg (request-from-lease info request-xid) 'broadcast))))
   (log-postal-debug "next-evt when transitioning to rebinding state ~a" next-evt)
   ((rebinding-state info request-instant request-xid) next-evt))
 
@@ -186,26 +186,16 @@
        ; However, since this is a renewal, the client is already bound.
        (maybe-ack-to-bound incoming-event request-instant)])))
 
-; TODO: Refactor with rebind-request
-(define (renew-request info xid)
-  (list (send-msg (message 'request
-                           xid
-                           0
-                           (lease-info-client-addr info)
-                           (number->ipv4-address 0)
-                           (number->ipv4-address 0)
-                           (number->ipv4-address 0)
-                           null) (lease-info-server-addr info))))
+(define (request-from-lease info xid)
+  (message 'request
+           xid
+           0
+           (lease-info-client-addr info)
+           (number->ipv4-address 0)
+           (number->ipv4-address 0)
+           (number->ipv4-address 0)
+           null))
 
-(define (rebind-request info xid)
-  (list (send-msg (message 'request
-                           xid
-                           0
-                           (lease-info-client-addr info)
-                           (number->ipv4-address 0)
-                           (number->ipv4-address 0)
-                           (number->ipv4-address 0)
-                           null) 'broadcast)))
 
 (define (lease-info-from-ack msg)
   (unless (eq? (message-type msg) 'ack)
