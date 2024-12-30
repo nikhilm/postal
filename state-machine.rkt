@@ -228,9 +228,8 @@
             (number->ipv4-address 0)
             (number->ipv4-address 0)
             (number->ipv4-address 0)
-            ; TODO: Would be nice if we could put tags as symbols instead of numbers.
-            (list (message-option 50 (message-yiaddr msg))
-                  (message-option 54 (optionsf msg 'server-identifier))))])
+            (list (message-option 'requested-ip-address (message-yiaddr msg))
+                  (message-option 'server-identifier (optionsf msg 'server-identifier))))])
 
 (define (request-to-server xid ciaddr)
   #|
@@ -353,10 +352,10 @@
 
    (let-values ([(_ events) (s (time-event 11000))])
      (check-match events
-                  (list (send-msg (struct* message ([type 'request] [options opts])) 'broadcast))
-                  (and (equal? (message-option-value (extract-option opts 54))
+                  (list (send-msg (and msg (struct* message ([type 'request] [options opts]))) 'broadcast))
+                  (and (equal? (optionsf msg 'server-identifier)
                                canonical-server-ip)
-                       (equal? (message-option-value (extract-option opts 50))
+                       (equal? (optionsf msg 'requested-ip-address)
                                (make-ip-address "192.168.11.3"))))))
 
   (test-case

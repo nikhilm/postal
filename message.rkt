@@ -29,8 +29,8 @@
   (write-int-addr (ip-address->number value)))
 
 (define/match (write-option option)
-  [((message-option 50 value)) (write-addr-option 50 value)]
-  [((message-option 54 value)) (write-addr-option 54 value)])
+  [((message-option (or 50 'requested-ip-address) value)) (write-addr-option 50 value)]
+  [((message-option (or 54 'server-identifier) value)) (write-addr-option 54 value)])
 
 (struct message
   (type ; symbol
@@ -176,6 +176,7 @@
     [3 (values 'router (read-addr-list))]
     [6 (values 'dns-server (read-addr-list))]
     [28 (values 'broadcast-address (read-len-prefixed-addr))]
+    [50 (values 'requested-ip-address (read-len-prefixed-addr))]
     [51 (values 'lease-time (read-len-prefixed-time))]
     [54 (values 'server-identifier (read-len-prefixed-addr))]
     [58 (values 'renewal-time (read-len-prefixed-time))]
