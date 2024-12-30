@@ -7,6 +7,7 @@
 (require net/ip)
 (require "logger.rkt")
 (require "message.rkt")
+(require (prefix-in retry: "retry.rkt"))
 
 (provide make-state-machine
          (struct-out send-msg)
@@ -29,6 +30,9 @@
 ; incoming needs a time, so the machine knows when packets came in
 (struct incoming (now sender msg) #:transparent)
 (struct time-event (now) #:transparent)
+
+; base struct for all postal exceptions.
+(struct exn:postal exn:fail () #:transparent)
 
 ; generator based attempt
 (define xid (make-parameter 0))
@@ -99,42 +103,81 @@
        ; accumulate offers, nothing to send.
        (loop (append offers (maybe-offer-list incom)) (yield timeout null))])))
 
-(define (requesting-state-timeout now)
-  (+ 10000 now))
+
+(struct exn:postal:invalid-time exn:postal () #:transparent)
+
+(define (raise-invalid-time str msg dur)
+  (raise
+   (exn:postal:invalid-time
+    (format "~a~n  time: ~a~n  message type: ~a~n  message options: ~a" str dur (message-type msg) (message-options msg))
+    (current-continuation-marks))))
+
+(define (make-request offer)
+  (list (send-msg (request-from-offer (next-xid!) offer) 'broadcast)))
 
 (define (to-requesting-state when offer)
-  (define event (yield (requesting-state-timeout when)
-                       (list (send-msg (request-from-offer
-                                        (next-xid!) offer) 'broadcast))))
+  (define event (yield (+ 4000 when)
+                       (make-request offer)))
+  ((requesting-state when offer) event))
 
-  ; TODO: Propagate the current now via requesting to bound, since t1 and t2 are calculated from there
-  ; TODO: Save the xid in the requesting-state so that the ack can be matched
-  ((requesting-state when) event))
 
-(define ((requesting-state request-send-instant) event)
-  (define timeout-instant (requesting-state-timeout request-send-instant))
-  (match event
-    [(time-event now) #:when (>= now timeout-instant)
-                      (error "Handle not receiving ack")]
-    ; want to yield just a timeout and wait.
-    [(time-event now) (error "TODO")]
-    ; TODO: If this ack was not intended for us, reloop.
-    [(and (incoming _ _ _) incom)
-     (maybe-ack-to-bound incom request-send-instant)]))
+; TODO: Propagate the current now via requesting to bound, since t1 and t2 are calculated from there
+; TODO: Save the xid in the requesting-state so that the ack can be matched
+(define (jitter)
+  ; move from positive to split around 0
+  (let ([j 2000])
+    (- (quotient j 2) (random j))))
 
-(define/match (maybe-ack-to-bound incom when)
+(define ((requesting-state now offer) event)
+  (let loop ([attempt-num 1]
+             [previous-request-send-instant now]
+             [timeout-instant (+ 4000 now (jitter))]
+             [the-event event])
+    (match the-event
+      [(time-event now) #:when (and (>= now timeout-instant) (> attempt-num 3))
+                        (log-postal-debug "all attempts done. next sm invocation will be passed to init-state")
+                        ((init-state) (yield now null))]
+      [(time-event now) #:when (>= now timeout-instant)
+                        (let ([next-timeout-instant (+ (* 4000 (expt 2 attempt-num)) (jitter) now)])
+                          (log-postal-debug "timeout")
+                          (loop (add1 attempt-num) now next-timeout-instant (yield next-timeout-instant (make-request offer))))]
+      [(time-event now) (loop attempt-num previous-request-send-instant timeout-instant (yield timeout-instant null))]
+      [(and (incoming _ _ _) incom)
+       (with-handlers ([exn:postal:invalid-time?
+                        (lambda (e)
+                          (log-postal-warning "Invalid DHCPACK ignored: ~e" e)
+                          ; treat this as if we never got a message.
+                          ; this means we just keep waiting for the original timeout to elapse.
+                          ; don't consider this an attempt.
+                          (loop attempt-num previous-request-send-instant timeout-instant (yield timeout-instant null)))])
+         (maybe-ack-to-bound incom previous-request-send-instant))])))
+
+(define/match (maybe-ack-to-bound incom base-instant)
   ; TODO: Handle other kinds of messages instead of assuming this is an ack
   ; TODO: Match with chosen
+  ; TODO: If renewal time or rebinding time are not specified, they should be 50% and 87.5% of the lease time with some jitter.
+  ; TODO: Store lease time.
   [((incoming in-time src msg) _)
-   (let ([maybe-renew (optionsf msg 'renewal-time)]
-         [maybe-rebind (optionsf msg 'rebinding-time)])
+   (let* ([lease-opt (optionsf msg 'lease-time)]
+          ; the wierd and trick is to make sure, if lease-opt is #f then the expression is immediately #f.
+          ; Otherwise the comparison will encounter a contract failure.
+          ; If the comparison succeeds, the value of the expression should be lease-opt, and not #t.
+          [lease-dur (or (and lease-opt (> lease-opt 5) lease-opt)
+                         (raise-invalid-time  "lease time not found, or too small" msg lease-opt))]
+          [renew-dur (or (optionsf msg 'renewal-time) (quotient lease-dur 2))]
+          [rebind-dur (or (optionsf msg 'rebinding-time) (truncate (* 0.875 lease-dur)))])
+     ; basic validation.
+     (when (> 1 renew-dur)
+       (raise-invalid-time "renewal time too small" msg renew-dur))
+     (when (> 2 rebind-dur)
+       (raise-invalid-time "rebinding time too small" msg rebind-dur))
+
      ; TODO: Handle 'lease-time and store it!
-     (if (and maybe-renew maybe-rebind)
-         (let ([info (lease-info-from-ack msg)]
-               [renew-instant (+ when (seconds->milliseconds maybe-renew))]
-               [rebind-instant (+ when (seconds->milliseconds maybe-rebind))])
-           (to-bound-state info renew-instant rebind-instant))
-         (error "TODO: Handle malformed message by going back to init or something")))])
+
+     (let ([info (lease-info-from-ack msg)]
+           [renew-instant (+ base-instant (seconds->milliseconds renew-dur))]
+           [rebind-instant (+ base-instant (seconds->milliseconds rebind-dur))])
+       (to-bound-state info renew-instant rebind-instant)))])
 
 (define (to-bound-state info renew-instant rebind-instant)
   ((bound-state info renew-instant rebind-instant) (yield renew-instant (list (iface-bind info)))))
@@ -177,6 +220,7 @@
 
 (define (to-rebinding-state info request-instant)
   (define request-xid (next-xid!))
+  ; TODO: Calibrate next wakeup to be based on the RFC calculations.
   (define next-evt (yield (+ 10000 request-instant) (list (send-msg (request-from-lease info request-xid) 'broadcast))))
   (log-postal-debug "next-evt when transitioning to rebinding state ~a" next-evt)
   ((rebinding-state info request-instant request-xid) next-evt))
@@ -185,6 +229,7 @@
 (define ((rebinding-state info request-instant request-xid) first-incom)
   (let loop ([incoming-event first-incom])
     (match incoming-event
+      ; TODO: Handle the case where if the time exceeds the lease time, this should unbind and go back to init.
       [(time-event now) #:when (> now (+ 10000 request-instant)) (error "TODO Handle retries and timeouts")]
       [(time-event now) (error "Handle retries and timeouts")]
       [(incoming now sender (and msg (struct* message ([type 'nak] [xid (== request-xid)]))))
@@ -309,7 +354,18 @@
 
   (test-case
    "Entering the BOUND state issues an interface binding event"
-   (define s (make-state-machine #:xid 42 #:start-state (requesting-state 11100)))
+   (define s (make-state-machine #:xid 42
+                                 #:start-state (requesting-state
+                                                11100
+                                                (make-incoming 9500 (message 'offer
+                                                                             34
+                                                                             0
+                                                                             (number->ipv4-address 0)
+                                                                             (make-ip-address "192.168.11.12")
+                                                                             (number->ipv4-address 0)
+                                                                             (number->ipv4-address 0)
+                                                                             (list
+                                                                              (message-option 'server-identifier canonical-server-ip)))))))
    (define-values (_ outgoing-events)
      (s (make-incoming 11100 (message 'ack
                                       42
@@ -329,6 +385,57 @@
                   (lease-info
                    (== (make-ip-address "192.168.11.12"))
                    (== (make-ip-address "192.168.11.1")))))))
+
+  (test-case
+   "An ACK with no lease time is ignored. Eventually moves back to init."
+   ; one DHCPREQUEST will be sent entering this state, and is not part of this test.
+   (define s (make-state-machine #:xid 42
+                                 #:start-state (requesting-state
+                                                130
+                                                (make-incoming 100 (message 'offer
+                                                                            34
+                                                                            0
+                                                                            (number->ipv4-address 0)
+                                                                            (make-ip-address "192.168.11.12")
+                                                                            (number->ipv4-address 0)
+                                                                            (number->ipv4-address 0)
+                                                                            (list
+                                                                             (message-option 'server-identifier canonical-server-ip)))))))
+
+   ; this is treated as malformed, so ignored and machine continues to wait for timeout.
+   (define-values (wakeup-at outgoing-events)
+     (s (make-incoming 1100 (message 'ack
+                                     42
+                                     0
+                                     (make-ip-address "192.168.11.12")
+                                     (make-ip-address "192.168.11.12")
+                                     (number->ipv4-address 0)
+                                     (number->ipv4-address 0)
+                                     (list (message-option 'renewal-time 1800)
+                                           (message-option 'rebinding-time 3150)
+                                           (message-option 'server-identifier canonical-server-ip))))))
+
+   ; there are 3 retransmits of the DHCPREQUEST for the original offer.
+   (define final-wakeup
+     (for/fold ([next-wakeup wakeup-at])
+               ([i (in-range 3)])
+       (match-let-values ([(wakeup-at outgoing-events) (s (time-event next-wakeup))])
+                         (check-match outgoing-events
+                                      (list
+                                       (struct* send-msg
+                                                ([to 'broadcast]
+                                                 [msg (struct* message ([type 'request]))]))))
+                         wakeup-at)))
+
+   (match-let-values ([(wakeup-at outgoing-events) (s (time-event final-wakeup))])
+                     (check-pred null? outgoing-events "expected no outgoing events after all attempts exhausted")
+
+                     ; init-state should trigger sending a discover on the transition to selecting.
+                     (match-let-values ([(wakeup-at outgoing-events) (s (time-event wakeup-at))])
+                                       (check-match outgoing-events
+                                                    (list (send-msg (struct* message ([type 'discover])) 'broadcast))))))
+  (test-case
+   "An ACK with no renewal time picks a reasonable default")
 
   (test-case
    "Once t1 expires, a (unicast) DHCPREQUEST is sent"
