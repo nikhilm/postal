@@ -231,71 +231,6 @@
             (list (message-option 'requested-ip-address (message-yiaddr msg))
                   (message-option 'server-identifier (optionsf msg 'server-identifier))))])
 
-(define (request-to-server xid ciaddr)
-  #|
-  DHCPREQUEST generated during RENEWING state:
-
-      'server identifier' MUST NOT be filled in, 'requested IP address'
-      option MUST NOT be filled in, 'ciaddr' MUST be filled in with
-      client's IP address. In this situation, the client is completely
-      configured, and is trying to extend its lease. This message will
-      be unicast, so no relay agents will be involved in its
-      transmission.  Because 'giaddr' is therefore not filled in, the
-      DHCP server will trust the value in 'ciaddr', and use it when
-      replying to the client.
-
-      A client MAY choose to renew or extend its lease prior to T1.  The
-      server may choose not to extend the lease (as a policy decision by
-      the network administrator), but should return a DHCPACK message
-      regardless.
-  |#
-  (message 'request
-           xid
-           0
-           ciaddr
-           (number->ipv4-address 0)
-           (number->ipv4-address 0)
-           (number->ipv4-address 0)
-           null))
-#|
-; TODO: Put the lease information here since it is required for renewal.
-; Likely will need to pull out into another struct.
-; what is a good way to manage these towers of structs?
-(struct bound-state (renew rebind info) #:transparent)
-(struct renewing-state (when rebind info) #:transparent)
-
-    [(and orig-state (bound-state renew-instant rebind-instant info))
-     (cond
-       [(>= now renew-instant)
-        (up-req (renewing-state now rebind-instant info)
-                (+ 5000 now)
-                ; Send a message to the server we last had a lease from.
-                ; TODO: Record local time at which lease sent, to calculate expiration time!
-                (list (send-msg
-                       (request-to-server (sm-xid machine) (lease-info-client-addr info))
-                       (lease-info-server-addr info))))]
-       ; TODO: Wish there was a way to say "nothing changed"
-       [else (up-req orig-state (+ 5000 now) null)])]
-
-    [(and orig-state (renewing-state when rebind-instant info))
-     (if
-      ; TODO: There are a few timeouts to handle
-      ; assuming there is a >60s delta between renewing and rebinding time,
-      ; after 60s we should attempt to resend the request.
-      ; same for rebinding, up until the lease time expires.
-      (>= now rebind-instant)
-      (error "TODO: Enter rebinding")
-      (if (not incom)
-          ; don't do anything until we hit rebinding if there are no incoming messages.
-          (up-req orig-state (+ 5000 now) null)
-          (begin
-            (if (and (equal? (incoming-sender incom) (lease-info-server-addr info))
-                     (equal? (message-type (incoming-msg incom)) 'ack))
-                (maybe-ack-to-bound incom now when)
-                (error "Need to handle not an ack")))))]))
-
-|#
-
 (module+ test
   (require rackunit)
   (require net/ip)
@@ -545,34 +480,3 @@
 
   #;(test-case
      "Ensure all states handle an eventual timeout"))
-
-#|
-  (test-case
-   "Handle transition to bound"
-   (define sm (make-state-machine #:current (requesting-state #f 10 1000) #:xid 23))
-   (define up (step sm 4 (incoming canonical-server-ip
-                                   (message
-                                    'ack
-                                    23
-                                    0
-                                    (make-ip-address "172.16.1.182")
-                                    (make-ip-address "172.16.1.182")
-                                    (make-ip-address "172.16.1.1")
-                                    (make-ip-address "0.0.0.0")
-                                    (list
-                                     (message-option 'server-identifier (make-ip-address "172.16.1.1"))
-                                     (message-option 'lease-time 120)
-                                     (message-option 'renewal-time 56)
-                                     (message-option 'rebinding-time 101)
-                                     (message-option 'subnet-mask (make-ip-address "255.255.255.0"))
-                                     (message-option 'broadcast-address (make-ip-address "172.16.1.255"))
-                                     (message-option 'router (make-ip-address "172.16.1.1"))
-                                     (message-option 'dns-server (make-ip-address "172.16.1.1")))))))
-   (match-define (update new-sm _ _) up)
-   (check-match (sm-current new-sm)
-                (bound-state 57000
-                             102000
-                             (lease-info client server))
-                (and (equal? client (make-ip-address "172.16.1.182"))
-                     (equal? server (make-ip-address "172.16.1.1"))))))
-|#
