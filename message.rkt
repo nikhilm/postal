@@ -12,8 +12,7 @@
 (require binaryio)
 (require net/ip)
 
-(provide make-dhcpdiscover
-         encode
+(provide encode
          parse
          (struct-out message)
          (struct-out message-option)
@@ -248,16 +247,6 @@
 (define (optionsf msg tag)
   (let ([opt (findf (lambda (opt) (eq? (message-option-tag opt) tag)) (message-options msg))])
     (and opt (message-option-value opt))))
-
-(define (make-dhcpdiscover xid)
-  (message 'discover
-           xid
-           0
-           (number->ipv4-address 0)
-           (number->ipv4-address 0)
-           (number->ipv4-address 0)
-           (number->ipv4-address 0)
-           null))
 
 (module+ test
   ; TODO: Request claude to generate a fuzzer for the parsers

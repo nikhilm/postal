@@ -61,6 +61,16 @@
   (define xid (next-xid!))
   ((selecting-state timeout-instant xid) (yield timeout-instant (list (send-msg (make-dhcpdiscover xid) 'broadcast)))))
 
+(define (make-dhcpdiscover xid)
+  (message 'discover
+           xid
+           0
+           (number->ipv4-address 0)
+           (number->ipv4-address 0)
+           (number->ipv4-address 0)
+           (number->ipv4-address 0)
+           null))
+
 (define ((selecting-state timeout expected-xid) first-event)
   (define/match (reasonable-offer? incom)
     [((incoming _ src (struct* message ([type 'offer] [xid (== expected-xid)])))) #t]

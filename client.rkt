@@ -170,7 +170,14 @@ OK, few things to sort out with the design
    "Malformed incoming messages are discarded"
    (define correct
      (parameterize ([interface-mac-addr (make-mac-addr "00:11:22:33:44:55")])
-       (encode (make-dhcpdiscover 17))))
+       (encode (message 'discover
+                        17
+                        0
+                        (number->ipv4-address 0)
+                        (number->ipv4-address 0)
+                        (number->ipv4-address 0)
+                        (number->ipv4-address 0)
+                        null))))
    (define malformed (subbytes correct 5))
    (define ch (make-channel))
    (thread
