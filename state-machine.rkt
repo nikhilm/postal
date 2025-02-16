@@ -8,6 +8,7 @@
 (require "logger.rkt")
 (require "message.rkt")
 (require (prefix-in retry: "retry.rkt"))
+(require "retry-ai.rkt")
 
 (provide make-state-machine
          (struct-out send-msg)
@@ -128,29 +129,34 @@
   (let ([j 2000])
     (- (quotient j 2) (random j))))
 
+(require "retry-ai.rkt")
+
 (define ((requesting-state now offer) event)
-  (let loop ([attempt-num 1]
-             [previous-request-send-instant now]
-             [timeout-instant (+ 4000 now (jitter))]
+  (define rpolicy (retry-policy 4 4000 2000))
+  (define rstate (make-retry-state rpolicy now))
+
+  (let loop ([state rstate]
              [the-event event])
     (match the-event
-      [(time-event now) #:when (and (>= now timeout-instant) (> attempt-num 3))
-                        (log-postal-debug "all attempts done. next sm invocation will be passed to init-state")
-                        ((init-state) (yield now null))]
-      [(time-event now) #:when (>= now timeout-instant)
-                        (let ([next-timeout-instant (+ (* 4000 (expt 2 attempt-num)) (jitter) now)])
-                          (log-postal-debug "timeout")
-                          (loop (add1 attempt-num) now next-timeout-instant (yield next-timeout-instant (make-request offer))))]
-      [(time-event now) (loop attempt-num previous-request-send-instant timeout-instant (yield timeout-instant null))]
+      [(time-event now)
+       #:when (retry-expired? state now)
+       (define next-state (next-retry-timeout state now))
+       (if next-state
+           (begin
+             (log-postal-debug "retry attempt ~a" (retry-state-attempt-num next-state))
+             (loop next-state (yield (retry-state-timeout-end next-state) (make-request offer))))
+           (begin
+             (log-postal-debug "all attempts done. next sm invocation will be passed to init-state")
+             ((init-state) (yield now null))))]
+      [(time-event now) (loop state (yield (retry-state-timeout-end state) null))]
       [(and (incoming _ _ _) incom)
        (with-handlers ([exn:postal:invalid-time?
                         (lambda (e)
                           (log-postal-warning "Invalid DHCPACK ignored: ~e" e)
                           ; treat this as if we never got a message.
                           ; this means we just keep waiting for the original timeout to elapse.
-                          ; don't consider this an attempt.
-                          (loop attempt-num previous-request-send-instant timeout-instant (yield timeout-instant null)))])
-         (maybe-ack-to-bound incom previous-request-send-instant))])))
+                          (loop state (yield (retry-state-timeout-end state) null)))])
+         (maybe-ack-to-bound incom (retry-state-last-attempt-time state)))])))
 
 (define/match (maybe-ack-to-bound incom base-instant)
   ; TODO: Handle other kinds of messages instead of assuming this is an ack

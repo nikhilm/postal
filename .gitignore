@@ -5,3 +5,5 @@
 compiled/
 /doc/
 client
+.aider.chat.history.md
+.aider.input.history
