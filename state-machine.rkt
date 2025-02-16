@@ -144,18 +144,18 @@
        (if next-state
            (begin
              (log-postal-debug "retry attempt ~a" (retry-state-attempt-num next-state))
-             (loop next-state (yield (retry-state-timeout-end next-state) (make-request offer))))
+             (loop next-state (yield (retry-state-deadline next-state) (make-request offer))))
            (begin
              (log-postal-debug "all attempts done. next sm invocation will be passed to init-state")
              ((init-state) (yield now null))))]
-      [(time-event now) (loop state (yield (retry-state-timeout-end state) null))]
+      [(time-event now) (loop state (yield (retry-state-deadline state) null))]
       [(and (incoming _ _ _) incom)
        (with-handlers ([exn:postal:invalid-time?
                         (lambda (e)
                           (log-postal-warning "Invalid DHCPACK ignored: ~e" e)
                           ; treat this as if we never got a message.
                           ; this means we just keep waiting for the original timeout to elapse.
-                          (loop state (yield (retry-state-timeout-end state) null)))])
+                          (loop state (yield (retry-state-deadline state) null)))])
          (maybe-ack-to-bound incom (retry-state-last-attempt-time state)))])))
 
 (define/match (maybe-ack-to-bound incom base-instant)

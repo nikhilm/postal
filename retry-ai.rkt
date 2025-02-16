@@ -19,7 +19,7 @@
 (struct retry-state (policy            ; The retry-policy being used
                      attempt-num        ; Current attempt number (1-based)
                      last-attempt-time  ; Timestamp of last attempt
-                     timeout-end) #:transparent)    ; When current timeout expires
+                     deadline) #:transparent)    ; When current attempt expires
 
 (define/contract (make-retry-state policy now)
   (retry-policy? exact-nonnegative-integer? . -> . retry-state?)
@@ -56,8 +56,8 @@
 
 (define/contract (retry-expired? state now)
   (retry-state? exact-nonnegative-integer? . -> . boolean?)
-  (define expired? (>= now (retry-state-timeout-end state)))
+  (define expired? (>= now (retry-state-deadline state)))
   (when expired?
-    (log-postal-debug "Retry timeout expired at ~a (end was ~a)"
-                      now (retry-state-timeout-end state)))
+    (log-postal-debug "Retry timeout expired at ~a (deadline was ~a)"
+                      now (retry-state-deadline state)))
   expired?)
