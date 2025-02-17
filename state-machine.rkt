@@ -133,30 +133,30 @@
 
 (define ((requesting-state now offer) event)
   (define rpolicy (retry-policy 4 4000 2000))
-  (define rstate (make-retry-state rpolicy now))
+  (define rstate (start-retry rpolicy now))
 
   (let loop ([state rstate]
+             [last-attempt-time now]
              [the-event event])
     (match the-event
       [(time-event now)
-       #:when (retry-expired? state now)
-       (define next-state (next-retry-timeout state now))
+       #:when (expired? state now)
+       (define next-state (next-retry state now))
        (if next-state
            (begin
-             (log-postal-debug "retry attempt ~a" (retry-state-attempt-num next-state))
-             (loop next-state (yield (retry-state-deadline next-state) (make-request offer))))
+             (loop next-state now (yield (get-deadline next-state) (make-request offer))))
            (begin
              (log-postal-debug "all attempts done. next sm invocation will be passed to init-state")
              ((init-state) (yield now null))))]
-      [(time-event now) (loop state (yield (retry-state-deadline state) null))]
+      [(time-event now) (loop state (yield (get-deadline state) null))]
       [(and (incoming _ _ _) incom)
        (with-handlers ([exn:postal:invalid-time?
                         (lambda (e)
                           (log-postal-warning "Invalid DHCPACK ignored: ~e" e)
                           ; treat this as if we never got a message.
                           ; this means we just keep waiting for the original timeout to elapse.
-                          (loop state (yield (retry-state-deadline state) null)))])
-         (maybe-ack-to-bound incom (retry-state-last-attempt-time state)))])))
+                          (loop state last-attempt-time (yield (get-deadline state) null)))])
+         (maybe-ack-to-bound incom last-attempt-time))])))
 
 (define/match (maybe-ack-to-bound incom base-instant)
   ; TODO: Handle other kinds of messages instead of assuming this is an ack

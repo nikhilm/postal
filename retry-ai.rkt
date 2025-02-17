@@ -4,11 +4,21 @@
 (require racket/match)
 (require "logger.rkt")
 
-(provide (struct-out retry-policy)
-         (struct-out retry-state)
-         make-retry-state
-         next-retry-timeout
-         retry-expired?)
+(provide
+ ; Create a retry policy with max attempts, base timeout (ms), and jitter range (ms)
+ (struct-out retry-policy)
+
+ ; Start a new retry sequence
+ start-retry
+
+ ; Check if current attempt has expired
+ expired?
+
+ ; Get next retry state, or #f if exhausted
+ next-retry
+
+ ; Get deadline for current attempt
+ (rename-out [retry-state-deadline get-deadline]))
 
 ; Configuration for retry behavior
 (struct retry-policy (max-attempts      ; Maximum number of attempts
@@ -18,17 +28,16 @@
 ; Current state of a retry operation
 (struct retry-state (policy            ; The retry-policy being used
                      attempt-num        ; Current attempt number (1-based)
-                     last-attempt-time  ; Timestamp of last attempt
                      deadline) #:transparent)    ; When current attempt expires
 
-(define/contract (make-retry-state policy now)
+; Start a new retry sequence
+(define/contract (start-retry policy now)
   (retry-policy? exact-nonnegative-integer? . -> . retry-state?)
-  (define timeout (next-timeout policy 1))
-  (log-postal-debug "Creating new retry state with policy ~a at time ~a, first timeout in ~ams for a deadline of ~a"
-                    policy now timeout (+ now timeout))
-  (retry-state policy 1 now (+ now timeout)))
+  (define timeout (calculate-timeout policy 1))
+  (log-postal-debug "Starting new retry sequence with policy ~a at ~a" policy now)
+  (retry-state policy 1 (+ now timeout)))
 
-(define (next-timeout policy attempt-num)
+(define (calculate-timeout policy attempt-num)
   (define base-timeout (retry-policy-base-timeout policy))
   (define jitter (- (random (retry-policy-jitter-range policy))
                     (quotient (retry-policy-jitter-range policy) 2)))
@@ -38,7 +47,7 @@
                     attempt-num base-timeout jitter timeout)
   timeout)
 
-(define/contract (next-retry-timeout state now)
+(define/contract (next-retry state now)
   (retry-state? exact-nonnegative-integer? . -> . (or/c #f retry-state?))
   (define policy (retry-state-policy state))
   (define next-attempt (add1 (retry-state-attempt-num state)))
@@ -47,14 +56,13 @@
       (begin
         (log-postal-debug "No more retries available after attempt ~a" (retry-state-attempt-num state))
         #f)  ; No more retries
-      (let ([next-deadline (+ now (next-timeout policy next-attempt))])
+      (let ([next-deadline (+ now (calculate-timeout policy next-attempt))])
         (log-postal-debug "Moving to retry attempt ~a with next deadline ~a" next-attempt next-deadline)
         (retry-state policy
                      next-attempt
-                     now
                      next-deadline))))
 
-(define/contract (retry-expired? state now)
+(define/contract (expired? state now)
   (retry-state? exact-nonnegative-integer? . -> . boolean?)
   (define expired? (>= now (retry-state-deadline state)))
   (when expired?
