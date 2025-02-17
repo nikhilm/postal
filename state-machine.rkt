@@ -8,7 +8,7 @@
 (require "logger.rkt")
 (require "message.rkt")
 (require (prefix-in retry: "retry.rkt"))
-(require "retry-ai.rkt")
+(require "retry.rkt")
 
 (provide make-state-machine
          (struct-out send-msg)
@@ -128,8 +128,6 @@
   ; move from positive to split around 0
   (let ([j 2000])
     (- (quotient j 2) (random j))))
-
-(require "retry-ai.rkt")
 
 (define ((requesting-state now offer) event)
   (define rpolicy (retry-policy 4 4000 2000))

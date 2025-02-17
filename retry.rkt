@@ -1,71 +1,122 @@
 #lang racket/base
 
+(require racket/contract)
 (require racket/match)
+(require "logger.rkt")
 
 (provide
- make-retry
- try-again
- (rename-out [tm-fail fail]))
+ ; Create a retry policy with max attempts, base timeout (ms), and jitter range (ms)
+ (struct-out retry-policy)
 
-; 1 means no jitter because (random k) returns an int 0 <= n < k
-(define (make-retry now initial-duration #:max-attempts max-attempts #:jitter [jitter 1])
-  (define/match (timer instant)
-    ; case where not enough time has elapsed.
-    [(instant) #:when (instant . < . (+ now initial-duration))
-               ; no attempt was used yet. request next wakeup after initial duration.
-               (try-again (make-retry now initial-duration #:max-attempts max-attempts #:jitter jitter) (+ now initial-duration))]
-    ; time has elapsed. determine based on attempts left.
-    [(instant)
-     (if (zero? max-attempts)
-         (tm-fail)
-         ; remember, next-instant may be _far_ after initial-expiry-instant.
-         ; in that case, do we adjust for that, or add to that?
-         ; right now, adding to that.
-         ; TODO: jitter
-         (let ([next-instant (+ instant (* initial-duration 2) (random jitter))])
-           (try-again (make-retry instant (* initial-duration 2) #:max-attempts (sub1 max-attempts) #:jitter jitter) next-instant)))])
+ ; Start a new retry sequence
+ start-retry
 
-  timer)
+ ; Check if current attempt has expired
+ expired?
 
-; The timer can be used in case the caller is not satisfied with the result.
-; oh, but what if this was the last attempt? Well in that case, it will immediately fail the next time.
-(struct try-again (timer next-instant) #:transparent)
-(struct tm-fail () #:transparent)
+ ; Get next retry state, or #f if exhausted
+ next-retry
+
+ ; Get deadline for current attempt
+ (rename-out [retry-state-deadline get-deadline]))
+
+; Configuration for retry behavior
+(struct retry-policy (max-attempts      ; Maximum number of attempts
+                      base-timeout       ; Base timeout in milliseconds
+                      jitter-range) #:transparent)  ; +/- jitter range in milliseconds
+
+; Current state of a retry operation
+(struct retry-state (policy            ; The retry-policy being used
+                     attempt-num        ; Current attempt number (1-based)
+                     deadline) #:transparent)    ; When current attempt expires
+
+; Start a new retry sequence
+(define/contract (start-retry policy now)
+  (retry-policy? exact-nonnegative-integer? . -> . retry-state?)
+  (define timeout (calculate-timeout policy 1))
+  (log-postal-debug "Starting new retry sequence with policy ~a at ~a" policy now)
+  (retry-state policy 1 (+ now timeout)))
+
+(define (calculate-timeout policy attempt-num)
+  (define base-timeout (retry-policy-base-timeout policy))
+  (define jitter-range (retry-policy-jitter-range policy))
+  (define jitter (if (zero? jitter-range)
+                     0
+                     (- (random jitter-range)
+                        (quotient jitter-range 2))))
+  (define timeout (+ (* base-timeout (expt 2 (sub1 attempt-num)))
+                     jitter))
+  (log-postal-debug "Calculated timeout for attempt ~a: base=~ams, jitter=~ams, total=~ams"
+                    attempt-num base-timeout jitter timeout)
+  timeout)
+
+(define/contract (next-retry state now)
+  (retry-state? exact-nonnegative-integer? . -> . (or/c #f retry-state?))
+  (define policy (retry-state-policy state))
+  (define next-attempt (add1 (retry-state-attempt-num state)))
+
+  (if (> next-attempt (retry-policy-max-attempts policy))
+      (begin
+        (log-postal-debug "No more retries available after attempt ~a" (retry-state-attempt-num state))
+        #f)  ; No more retries
+      (let ([next-deadline (+ now (calculate-timeout policy next-attempt))])
+        (log-postal-debug "Moving to retry attempt ~a with next deadline ~a" next-attempt next-deadline)
+        (retry-state policy
+                     next-attempt
+                     next-deadline))))
+
+(define/contract (expired? state now)
+  (retry-state? exact-nonnegative-integer? . -> . boolean?)
+  (define expired? (>= now (retry-state-deadline state)))
+  (when expired?
+    (log-postal-debug "Retry timeout expired at ~a (deadline was ~a)"
+                      now (retry-state-deadline state)))
+  expired?)
 
 (module+ test
-  (require racket/match)
   (require rackunit)
-  (test-case
-   "Basic timeout"
-
-   (define timer (make-retry 5000 50 #:max-attempts 3))
-   ; this was before the first expected timeout, so should return try-again with no attempt deduction.
-   (match-define (try-again timer1 next-inst1) (timer 5023))
-   (check-eq? next-inst1 5050)
-
-   (match-define (try-again timer2 next-inst2) (timer1 next-inst1))
-   (check-eq? next-inst2 5150)
-
-   (match-define (try-again timer3 next-inst3) (timer2 (add1 next-inst2)))
-   (check-eq? next-inst3 5351)
-
-   ; another spurious wakeup.
-   (match-define (try-again timer4 next-inst4) (timer3 (sub1 next-inst3)))
-   (check-eq? next-inst4 5351)
-
-   (check-match (timer4 (add1 next-inst4)) (tm-fail)))
 
   (test-case
-   "Jitter"
-   (let ([max-attempts 7]
-         [start-inst 5000]
-         [start-duration 50]
-         [jitter 10])
-     (define-values (timer next-inst)
-       (for/fold ([timer (make-retry start-inst start-duration #:max-attempts max-attempts #:jitter jitter)]
-                  [inst 5001])
-                 ([i (in-range 7)] )
-         (match-define (try-again next-timer next-inst) (timer inst))
-         (check-= next-inst (+ inst (* start-duration (expt 2 i))) 10)
-         (values next-timer next-inst)))
-     (check-match (timer (add1 next-inst)) (tm-fail)))))
+   "retry sequence follows expected timeouts"
+   (define policy (retry-policy 3 1000 0)) ; no jitter for predictable tests
+   (define now 5000)
+
+   ; First attempt
+   (define state1 (start-retry policy now))
+   (check-equal? (retry-state-attempt-num state1) 1)
+   (check-equal? (retry-state-deadline state1) (+ now 1000))
+   (check-false (expired? state1 (+ now 999)))
+   (check-true (expired? state1 (+ now 1000)))
+
+   ; Second attempt (2x timeout)
+   (define state2 (next-retry state1 (+ now 1000)))
+   (check-equal? (retry-state-attempt-num state2) 2)
+   (check-equal? (retry-state-deadline state2) (+ now 1000 2000))
+
+   ; Third attempt (4x timeout)
+   (define state3 (next-retry state2 (+ now 3000)))
+   (check-equal? (retry-state-attempt-num state3) 3)
+   (check-equal? (retry-state-deadline state3) (+ now 3000 4000))
+
+   ; No more attempts
+   (check-false (next-retry state3 (+ now 7000))))
+
+  (test-case
+   "jitter affects deadlines"
+   (define policy (retry-policy 2 1000 200))
+   (define state (start-retry policy 1000))
+
+   ; Deadline should be base +/- jitter/2
+   (define deadline (- (retry-state-deadline state) 1000))
+   (check-true (<= 900 deadline 1100)
+               (format "deadline ~a not within expected range" deadline)))
+
+  (test-case
+   "expired? returns #f until deadline"
+   (define policy (retry-policy 2 1000 0))
+   (define state (start-retry policy 1000))
+
+   (check-false (expired? state 1000))
+   (check-false (expired? state 1999))
+   (check-true (expired? state 2000))
+   (check-true (expired? state 2001))))
