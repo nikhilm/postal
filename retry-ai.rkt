@@ -39,8 +39,11 @@
 
 (define (calculate-timeout policy attempt-num)
   (define base-timeout (retry-policy-base-timeout policy))
-  (define jitter (- (random (retry-policy-jitter-range policy))
-                    (quotient (retry-policy-jitter-range policy) 2)))
+  (define jitter-range (retry-policy-jitter-range policy))
+  (define jitter (if (zero? jitter-range)
+                     0
+                     (- (random jitter-range)
+                        (quotient jitter-range 2))))
   (define timeout (+ (* base-timeout (expt 2 (sub1 attempt-num)))
                      jitter))
   (log-postal-debug "Calculated timeout for attempt ~a: base=~ams, jitter=~ams, total=~ams"
@@ -69,3 +72,51 @@
     (log-postal-debug "Retry timeout expired at ~a (deadline was ~a)"
                       now (retry-state-deadline state)))
   expired?)
+
+(module+ test
+  (require rackunit)
+
+  (test-case
+   "retry sequence follows expected timeouts"
+   (define policy (retry-policy 3 1000 0)) ; no jitter for predictable tests
+   (define now 5000)
+
+   ; First attempt
+   (define state1 (start-retry policy now))
+   (check-equal? (retry-state-attempt-num state1) 1)
+   (check-equal? (retry-state-deadline state1) (+ now 1000))
+   (check-false (expired? state1 (+ now 999)))
+   (check-true (expired? state1 (+ now 1000)))
+
+   ; Second attempt (2x timeout)
+   (define state2 (next-retry state1 (+ now 1000)))
+   (check-equal? (retry-state-attempt-num state2) 2)
+   (check-equal? (retry-state-deadline state2) (+ now 1000 2000))
+
+   ; Third attempt (4x timeout)
+   (define state3 (next-retry state2 (+ now 3000)))
+   (check-equal? (retry-state-attempt-num state3) 3)
+   (check-equal? (retry-state-deadline state3) (+ now 3000 4000))
+
+   ; No more attempts
+   (check-false (next-retry state3 (+ now 7000))))
+
+  (test-case
+   "jitter affects deadlines"
+   (define policy (retry-policy 2 1000 200))
+   (define state (start-retry policy 1000))
+
+   ; Deadline should be base +/- jitter/2
+   (define deadline (- (retry-state-deadline state) 1000))
+   (check-true (<= 900 deadline 1100)
+               (format "deadline ~a not within expected range" deadline)))
+
+  (test-case
+   "expired? returns #f until deadline"
+   (define policy (retry-policy 2 1000 0))
+   (define state (start-retry policy 1000))
+
+   (check-false (expired? state 1000))
+   (check-false (expired? state 1999))
+   (check-true (expired? state 2000))
+   (check-true (expired? state 2001))))
