@@ -440,7 +440,43 @@
                                        (check-match outgoing-events
                                                     (list (send-msg (struct* message ([type 'discover])) 'broadcast))))))
   (test-case
-   "An ACK with no renewal time picks a reasonable default")
+   "An ACK with no renewal time picks a reasonable default"
+   (define s (make-state-machine #:xid 42
+                                 #:start-state (requesting-state
+                                                (start-retry (retry-policy 4 4000 2000) 11100)
+                                                11100
+                                                (make-incoming 9500 (message 'offer
+                                                                             34
+                                                                             0
+                                                                             (number->ipv4-address 0)
+                                                                             (make-ip-address "192.168.11.12")
+                                                                             (number->ipv4-address 0)
+                                                                             (number->ipv4-address 0)
+                                                                             (list
+                                                                              (message-option 'server-identifier canonical-server-ip)))))))
+   ; Send an ACK without renewal-time option
+   (define-values (wakeup-at outgoing-events)
+     (s (make-incoming 11100 (message 'ack
+                                      42
+                                      0
+                                      (make-ip-address "192.168.11.12")
+                                      (make-ip-address "192.168.11.12")
+                                      (number->ipv4-address 0)
+                                      (number->ipv4-address 0)
+                                      (list (message-option 'rebinding-time k-test-rebinding-time)
+                                            (message-option 'lease-time k-test-lease-time)
+                                            (message-option 'server-identifier canonical-server-ip))))))
+
+   ; Verify we got a bind event
+   (check-match outgoing-events
+                (list
+                 (iface-bind
+                  (lease-info
+                   (== (make-ip-address "192.168.11.12"))
+                   (== canonical-server-ip)))))
+
+   ; Verify the next wakeup is at 50% of lease time (1800s = 1800000ms)
+   (check-equal? wakeup-at (+ 11100 (* 1000 (quotient k-test-lease-time 2)))))
 
   (test-case
    "Once t1 expires, a (unicast) DHCPREQUEST is sent"
@@ -474,11 +510,78 @@
    (check-match outgoing-events
                 (list (send-msg (struct* message ([type 'request])) 'broadcast))))
 
-  #;(test-case
-     "When in renewing, renewal is re-attempted periodically")
+  (test-case
+   "When in renewing, renewal is re-attempted periodically"
+   (define s (make-state-machine #:xid 42
+                                 #:start-state (renewing-state
+                                                (lease-info (make-ip-address "192.168.11.12")
+                                                            (make-ip-address "192.168.11.1"))
+                                                3000
+                                                1000
+                                                42)))
+   ; First attempt already sent on state entry
+   ; Check that after half the remaining time (1000ms), another attempt is made
+   (define-values (wakeup-at outgoing-events)
+     (s (time-event 2000)))
+   (check-match outgoing-events
+                (list (send-msg (struct* message ([type 'request])) (== canonical-server-ip))))
 
-  #;(test-case
-     "When in renewing, unexpected packets are ignored")
+   ; Verify minimum interval of 60 seconds is respected
+   (define-values (next-wakeup next-events)
+     (s (time-event (+ wakeup-at 60000))))
+   (check-match next-events
+                (list (send-msg (struct* message ([type 'request])) (== canonical-server-ip)))))
+
+  (test-case
+   "When in renewing, unexpected packets are ignored"
+   (define s (make-state-machine #:xid 42
+                                 #:start-state (renewing-state
+                                                (lease-info (make-ip-address "192.168.11.12")
+                                                            (make-ip-address "192.168.11.1"))
+                                                3000
+                                                1000
+                                                42)))
+   ; Send an offer - should be ignored
+   (define-values (wakeup1 events1)
+     (s (make-incoming 1500 canonical-server-ip
+                       (message 'offer
+                                99
+                                0
+                                (number->ipv4-address 0)
+                                (make-ip-address "192.168.11.12")
+                                (number->ipv4-address 0)
+                                (number->ipv4-address 0)
+                                (list (message-option 'server-identifier canonical-server-ip))))))
+   (check-equal? events1 null)
+
+   ; Send a discover - should be ignored
+   (define-values (wakeup2 events2)
+     (s (make-incoming 1600 canonical-server-ip
+                       (message 'discover
+                                99
+                                0
+                                (number->ipv4-address 0)
+                                (number->ipv4-address 0)
+                                (number->ipv4-address 0)
+                                (number->ipv4-address 0)
+                                null))))
+   (check-equal? events2 null)
+
+   ; Send an ACK with wrong XID - should be ignored
+   (define-values (wakeup3 events3)
+     (s (make-incoming 1700 canonical-server-ip
+                       (message 'ack
+                                99
+                                0
+                                (make-ip-address "192.168.11.12")
+                                (make-ip-address "192.168.11.12")
+                                (number->ipv4-address 0)
+                                (number->ipv4-address 0)
+                                (list (message-option 'renewal-time k-test-renewal-time)
+                                      (message-option 'rebinding-time k-test-rebinding-time)
+                                      (message-option 'lease-time k-test-lease-time)
+                                      (message-option 'server-identifier canonical-server-ip))))))
+   (check-equal? events3 null))
 
   (test-case
    "When in renewing, a nak leads to reset"
@@ -531,11 +634,76 @@
                    (== (make-ip-address "192.168.11.12"))
                    (== (make-ip-address "192.168.11.1")))))))
 
-  #;(test-case
-     "When in rebinding, rebinding is re-attempted periodically")
+  (test-case
+   "When in rebinding, rebinding is re-attempted periodically"
+   (define s (make-state-machine #:xid 42
+                                 #:start-state (rebinding-state
+                                                (lease-info (make-ip-address "192.168.11.12")
+                                                            (make-ip-address "192.168.11.1"))
+                                                1000
+                                                42)))
+   ; First attempt already sent on state entry
+   ; Check that after half the remaining time (500ms), another attempt is made
+   (define-values (wakeup-at outgoing-events)
+     (s (time-event 1500)))
+   (check-match outgoing-events
+                (list (send-msg (struct* message ([type 'request])) 'broadcast)))
 
-  #;(test-case
-     "When in rebinding, unexpected packets are ignored")
+   ; Verify minimum interval of 60 seconds is respected
+   (define-values (next-wakeup next-events)
+     (s (time-event (+ wakeup-at 60000))))
+   (check-match next-events
+                (list (send-msg (struct* message ([type 'request])) 'broadcast))))
+
+  (test-case
+   "When in rebinding, unexpected packets are ignored"
+   (define s (make-state-machine #:xid 42
+                                 #:start-state (rebinding-state
+                                                (lease-info (make-ip-address "192.168.11.12")
+                                                            (make-ip-address "192.168.11.1"))
+                                                1000
+                                                42)))
+   ; Send an offer - should be ignored
+   (define-values (wakeup1 events1)
+     (s (make-incoming 1100 canonical-server-ip
+                       (message 'offer
+                                99
+                                0
+                                (number->ipv4-address 0)
+                                (make-ip-address "192.168.11.12")
+                                (number->ipv4-address 0)
+                                (number->ipv4-address 0)
+                                (list (message-option 'server-identifier canonical-server-ip))))))
+   (check-equal? events1 null)
+
+   ; Send a discover - should be ignored
+   (define-values (wakeup2 events2)
+     (s (make-incoming 1200 canonical-server-ip
+                       (message 'discover
+                                99
+                                0
+                                (number->ipv4-address 0)
+                                (number->ipv4-address 0)
+                                (number->ipv4-address 0)
+                                (number->ipv4-address 0)
+                                null))))
+   (check-equal? events2 null)
+
+   ; Send an ACK with wrong XID - should be ignored
+   (define-values (wakeup3 events3)
+     (s (make-incoming 1300 canonical-server-ip
+                       (message 'ack
+                                99
+                                0
+                                (make-ip-address "192.168.11.12")
+                                (make-ip-address "192.168.11.12")
+                                (number->ipv4-address 0)
+                                (number->ipv4-address 0)
+                                (list (message-option 'renewal-time k-test-renewal-time)
+                                      (message-option 'rebinding-time k-test-rebinding-time)
+                                      (message-option 'lease-time k-test-lease-time)
+                                      (message-option 'server-identifier canonical-server-ip))))))
+   (check-equal? events3 null))
 
   (test-case
    "When in rebinding, a nak leads to reset"
