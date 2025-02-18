@@ -117,9 +117,11 @@
   (list (send-msg (request-from-offer (next-xid!) offer) 'broadcast)))
 
 (define (to-requesting-state when offer)
-  (define event (yield (+ 4000 when)
+  (define rpolicy (retry-policy 4 4000 2000))
+  (define rstate (start-retry rpolicy when))
+  (define event (yield (get-deadline rstate)
                        (make-request offer)))
-  ((requesting-state when offer) event))
+  ((requesting-state rstate when offer) event))
 
 
 ; TODO: Propagate the current now via requesting to bound, since t1 and t2 are calculated from there
@@ -129,10 +131,7 @@
   (let ([j 2000])
     (- (quotient j 2) (random j))))
 
-(define ((requesting-state now offer) event)
-  (define rpolicy (retry-policy 4 4000 2000))
-  (define rstate (start-retry rpolicy now))
-
+(define ((requesting-state rstate now offer) event)
   (let loop ([state rstate]
              [last-attempt-time now]
              [the-event event])
@@ -360,6 +359,7 @@
    "Entering the BOUND state issues an interface binding event"
    (define s (make-state-machine #:xid 42
                                  #:start-state (requesting-state
+                                                (start-retry (retry-policy 4 4000 2000) 11100)
                                                 11100
                                                 (make-incoming 9500 (message 'offer
                                                                              34
@@ -395,6 +395,7 @@
    ; one DHCPREQUEST will be sent entering this state, and is not part of this test.
    (define s (make-state-machine #:xid 42
                                  #:start-state (requesting-state
+                                                (start-retry (retry-policy 4 4000 2000) 130)
                                                 130
                                                 (make-incoming 100 (message 'offer
                                                                             34
