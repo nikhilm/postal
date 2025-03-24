@@ -198,70 +198,164 @@
                         (loop (yield (lease-instants-renewal l-instants) null))]
       [_ (error "Don't know what to do with a packet when in bound.")])))
 
+; umm, recursion? i.e. renewing-state, rather than being a loop, calls itself with a transition that causes a packet send?
+; any way, renewing state needs:
+; - lease information
+; - current time (because the first entry is from an event handled by the previous state)
+; - lease instants information
+; when it sends a dhcprequest, it has to remember:
+; - the time when it send the request, so that on receiving an ack, that is the basis for the lease calculation. this has to be carried around.
+; - the request xid to match acks against. xid re-use is allowed.
+; - almost feel like these 2 can be a struct?
+
 (define (to-renewing-state info l-instants now)
-  ; TODO: Should actually wait "one half of the remaining time until T2 [...] down to a minimum of 60 seconds,
-  ; before retransmitting the DHCP request.".
+  ; Use the new implementation that handles the initial request and validation
+  (renewing-state-new info l-instants now))
 
-  ; this is another case where the attempt to strictly separate the transition transmission from the in-state transmission
-  ; keeps messing up encapsulation by requiring the two to share timeout calculation state.
-  ; one option is to have the first iteration of the renewing-state handle the transition transmission.
-  ; but what is the other option?
+
+;; Helper function to calculate next request interval based on time until rebinding
+;; Takes current time and rebinding time, returns the interval to wait
+(define (calculate-request-interval now rebinding-time)
+  ;; Calculate time until rebinding
+  (define time-until-rebind (- rebinding-time now))
+  ;; Calculate half of the remaining time as per RFC
+  (define half-remaining (quotient time-until-rebind 2))
+  ;; Ensure minimum interval of 60 seconds
+  (max (* 60 1000) half-remaining))
+
+;; New implementation of renewing state with improved validation and structure
+(define (renewing-state-new info l-instants current-time)
+  ;; Send initial DHCPREQUEST to the server that provided our lease
   (define request-xid (next-xid!))
-  (define next-evt (yield (lease-instants-rebinding l-instants) (list (send-msg (request-from-lease info request-xid) (lease-info-server-addr info)))))
-  (log-postal-debug "next-evt when transitioning to renewing state ~a" next-evt)
-  ((renewing-state info l-instants now request-xid) next-evt))
+  (define initial-request-time current-time)
 
-(define ((renewing-state info l-instants request-instant request-xid) first-incom)
-  (let loop ([incoming-event first-incom]
-             [last-request-time request-instant])
+  ;; Calculate initial request interval
+  (define initial-interval (calculate-request-interval
+                            current-time
+                            (lease-instants-rebinding l-instants)))
+
+  ;; Calculate when the next request should be sent
+  (define next-request-time (+ initial-request-time initial-interval))
+
+  ;; Send the initial request and get the first event
+  (define first-event (yield next-request-time
+                             (list (send-msg (request-from-lease info request-xid)
+                                             (lease-info-server-addr info)))))
+
+  (let loop ([incoming-event first-event]
+             [last-request-time initial-request-time])
+    ;; Get current time from the event
+    (define now (match incoming-event
+                  [(time-event t) t]
+                  [(incoming t _ _) t]
+                  [_ current-time]))  ;; Fallback, though this shouldn't happen
+
+    ;; Calculate when the next request should be sent based on the last request time
+    (define time-for-next-request (+ last-request-time
+                                     (calculate-request-interval last-request-time
+                                                                 (lease-instants-rebinding l-instants))))
+
+    ;; Calculate next interval for future scheduling
+    (define next-interval (calculate-request-interval now (lease-instants-rebinding l-instants)))
+    (define next-request-time (+ now next-interval))
+
     (match incoming-event
-      [(time-event now) #:when (> now (lease-instants-rebinding l-instants))
+      ;; If we reach T2 (rebinding time), transition to rebinding state
+      [(time-event now) #:when (>= now (lease-instants-rebinding l-instants))
                         (to-rebinding-state info now)]
+
+      ;; Handle periodic retransmission
       [(time-event now)
-       (define time-until-rebind (- (lease-instants-rebinding l-instants) now))
-       (define half-remaining (quotient time-until-rebind 2))
-       (define next-interval (max (* 60 1000) half-remaining))
-       (define next-request-time (+ now next-interval))
-       (if (>= (- now last-request-time) next-interval)
+       ;; Check if it's time to send another request using the calculated time
+       (if (>= now time-for-next-request)
+           ;; Time to send another request
            (loop (yield next-request-time
                         (list (send-msg (request-from-lease info request-xid)
                                         (lease-info-server-addr info))))
                  now)
-           (loop (yield (+ now next-interval) null)
+           ;; Not time yet, just wait
+           (loop (yield time-for-next-request null)
                  last-request-time))]
+
+      ;; Handle DHCPNAK - release address and go back to init
       [(incoming now sender (and msg (struct* message ([type 'nak] [xid (== request-xid)]))))
-       ; TODO Perform additional validation on the sender.
-       ((init-state) (yield (+ 2000 now) (list (iface-unbind))))]
-      [(incoming _ sender (and msg (struct* message ([type 'ack] [xid (== request-xid)]))))
-       ; TODO Perform additional validation on the sender. plus yiaddr should match the original ciaddr.
-       ; TODO: There is a flaw here. Using maybe-ack-to-bound results in an iface-bind event to the caller.
-       ; However, since this is a renewal, the client is already bound.
-       (maybe-ack-to-bound incoming-event request-instant)]
-      [other (log-postal-debug "renewing-state: Ignoring event ~a" other)
+       ;; Validate the sender is our server
+       (when (ip-address=? sender (lease-info-server-addr info))
+         ((init-state) (yield (+ 2000 now) (list (iface-unbind)))))]
+
+      ;; Handle DHCPACK - renew lease and go back to bound
+      [(incoming now sender (and msg (struct* message ([type 'ack] [xid (== request-xid)]))))
+       ;; Validate the sender is our server and the address matches
+       (when (and (ip-address=? sender (lease-info-server-addr info))
+                  (ip-address=? (message-yiaddr msg) (lease-info-client-addr info)))
+         (maybe-ack-to-bound incoming-event last-request-time))]
+
+      ;; Ignore any other messages - now using the calculated next_request_time
+      [other (log-postal-debug "renewing-state-new: Ignoring event ~a" other)
              (loop (yield next-request-time null) last-request-time)])))
 
 (define (to-rebinding-state info request-instant)
   (define request-xid (next-xid!))
-  ; TODO: Calibrate next wakeup to be based on the RFC calculations.
-  (define next-evt (yield (+ 10000 request-instant) (list (send-msg (request-from-lease info request-xid) 'broadcast))))
+  ;; Calculate request interval
+  (define interval (calculate-request-interval
+                    request-instant
+                    (+ request-instant (* 10 60 1000)))) ;; Use 10 minutes as fallback
+
+  ;; Calculate when the next request should be sent
+  (define next-request-time (+ request-instant interval))
+
+  (define next-evt (yield next-request-time (list (send-msg (request-from-lease info request-xid) 'broadcast))))
   (log-postal-debug "next-evt when transitioning to rebinding state ~a" next-evt)
   ((rebinding-state info request-instant request-xid) next-evt))
 
 ; TODO: It seems like renewing and rebinding states have the same logic with slight differences. See what can be refactored.
 (define ((rebinding-state info request-instant request-xid) first-incom)
-  (let loop ([incoming-event first-incom])
+  (let loop ([incoming-event first-incom]
+             [last-request-time request-instant])
+    ;; Calculate current time from the event
+    (define now (match incoming-event
+                  [(time-event t) t]
+                  [(incoming t _ _) t]
+                  [_ request-instant]))  ;; Fallback, though this shouldn't happen
+
+    ;; Calculate when the next request should be sent based on the last request time
+    (define time-for-next-request (+ last-request-time
+                                     (calculate-request-interval last-request-time
+                                                                 (+ request-instant (* 10 60 1000)))))
+
+    ;; Calculate next interval for future scheduling
+    (define next-interval (calculate-request-interval now (+ request-instant (* 10 60 1000))))
+    (define next-request-time (+ now next-interval))
+
     (match incoming-event
-      ; TODO: Handle the case where if the time exceeds the lease time, this should unbind and go back to init.
-      [(time-event now) #:when (> now (+ 10000 request-instant)) (error "TODO Handle retries and timeouts")]
-      [(time-event now) (error "Handle retries and timeouts")]
+      ;; If we exceed the lease time (estimated), unbind and go back to init
+      [(time-event now) #:when (> now (+ request-instant (* 10 60 1000)))
+                        ((init-state) (yield (+ 2000 now) (list (iface-unbind))))]
+
+      ;; Handle periodic retransmission
+      [(time-event now)
+       ;; Check if it's time to send another request using the calculated time
+       (if (>= now time-for-next-request)
+           ;; Time to send another request
+           (loop (yield next-request-time
+                        (list (send-msg (request-from-lease info request-xid) 'broadcast)))
+                 now)
+           ;; Not time yet, just wait
+           (loop (yield time-for-next-request null)
+                 last-request-time))]
+
       [(incoming now sender (and msg (struct* message ([type 'nak] [xid (== request-xid)]))))
-       ; TODO Perform additional validation on the sender.
+       ;; No need to validate sender in rebinding - any server can respond
        ((init-state) (yield (+ 2000 now) (list (iface-unbind))))]
+
       [(incoming _ sender (and msg (struct* message ([type 'ack] [xid (== request-xid)]))))
-       ; TODO Perform additional validation on the sender. plus yiaddr should match the original ciaddr.
-       ; TODO: There is a flaw here. Using maybe-ack-to-bound results in an iface-bind event to the caller.
-       ; However, since this is a renewal, the client is already bound.
-       (maybe-ack-to-bound incoming-event request-instant)])))
+       ;; Validate the address matches
+       (when (ip-address=? (message-yiaddr msg) (lease-info-client-addr info))
+         (maybe-ack-to-bound incoming-event request-instant))]
+
+      ;; Ignore any other messages
+      [other (log-postal-debug "rebinding-state: Ignoring event ~a" other)
+             (loop (yield next-request-time null) last-request-time)])))
 
 (define (request-from-lease info xid)
   (message 'request
@@ -555,12 +649,11 @@
   (test-case
    "When in renewing, unexpected packets are ignored"
    (define s (make-state-machine #:xid 42
-                                 #:start-state (renewing-state
+                                 #:start-state (renewing-state-new
                                                 (lease-info (make-ip-address "192.168.11.12")
                                                             (make-ip-address "192.168.11.1"))
                                                 (lease-instants #f #f 3000)
-                                                1000
-                                                42)))
+                                                1000)))
    ; Send an offer - should be ignored
    (define-values (wakeup1 events1)
      (s (make-incoming 1500 canonical-server-ip
