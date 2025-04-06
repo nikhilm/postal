@@ -209,55 +209,52 @@
 ; - almost feel like these 2 can be a struct?
 
 (define (to-renewing-state info l-instants now)
-  ; Use the new implementation that handles the initial request and validation
-  (renewing-state-new info l-instants now))
-
-
-;; Helper function to calculate next request interval based on time until rebinding
-;; Takes current time and rebinding time, returns the interval to wait
-(define (calculate-request-interval now rebinding-time)
-  ;; Calculate time until rebinding
-  (define time-until-rebind (- rebinding-time now))
-  ;; Calculate half of the remaining time as per RFC
-  (define half-remaining (quotient time-until-rebind 2))
-  ;; Ensure minimum interval of 60 seconds
-  (max (* 60 1000) half-remaining))
-
-;; New implementation of renewing state with improved validation and structure
-(define (renewing-state-new info l-instants current-time)
   ;; Send initial DHCPREQUEST to the server that provided our lease
   (define request-xid (next-xid!))
-  (define initial-request-time current-time)
-
-  ;; Calculate initial request interval
-  (define initial-interval (calculate-request-interval
-                            current-time
-                            (lease-instants-rebinding l-instants)))
 
   ;; Calculate when the next request should be sent
-  (define next-request-time (+ initial-request-time initial-interval))
+  (define next-request-time (calculate-request-timeout-instant
+                             now
+                             (lease-instants-rebinding l-instants)))
 
   ;; Send the initial request and get the first event
   (define first-event (yield next-request-time
                              (list (send-msg (request-from-lease info request-xid)
                                              (lease-info-server-addr info)))))
 
+  ;; Transition to the renewing state with the first event and the time of the last request (now)
+  ((renewing-state-new info l-instants now) first-event))
+
+
+;; Helper function to calculate the absolute time when the next request should be sent
+;; Takes current time and rebinding time, returns the absolute timeout instant
+(define (calculate-request-timeout-instant now rebinding-time)
+  ;; Calculate time until rebinding
+  (define time-until-rebind (- rebinding-time now))
+  ;; Calculate half of the remaining time as per RFC
+  (define half-remaining (quotient time-until-rebind 2))
+  ;; Ensure minimum interval of 60 seconds
+  (define interval (max (* 60 1000) half-remaining))
+  ;; Return the absolute timeout instant
+  (+ now interval))
+
+;; New implementation of renewing state with improved validation and structure
+(define ((renewing-state-new info l-instants last-request-time) first-event)
+  ;; Use the passed-in last-request-time instead of deriving it from the event
+  (define request-xid (next-xid!))
+
   (let loop ([incoming-event first-event]
-             [last-request-time initial-request-time])
+             [last-request-time last-request-time])
+
     ;; Get current time from the event
     (define now (match incoming-event
                   [(time-event t) t]
-                  [(incoming t _ _) t]
-                  [_ current-time]))  ;; Fallback, though this shouldn't happen
+                  [(incoming t _ _) t]))
 
     ;; Calculate when the next request should be sent based on the last request time
-    (define time-for-next-request (+ last-request-time
-                                     (calculate-request-interval last-request-time
-                                                                 (lease-instants-rebinding l-instants))))
-
-    ;; Calculate next interval for future scheduling
-    (define next-interval (calculate-request-interval now (lease-instants-rebinding l-instants)))
-    (define next-request-time (+ now next-interval))
+    (define time-for-next-request (calculate-request-timeout-instant
+                                   last-request-time
+                                   (lease-instants-rebinding l-instants)))
 
     (match incoming-event
       ;; If we reach T2 (rebinding time), transition to rebinding state
@@ -269,7 +266,9 @@
        ;; Check if it's time to send another request using the calculated time
        (if (>= now time-for-next-request)
            ;; Time to send another request
-           (loop (yield next-request-time
+           (loop (yield (calculate-request-timeout-instant
+                         now
+                         (lease-instants-rebinding l-instants))
                         (list (send-msg (request-from-lease info request-xid)
                                         (lease-info-server-addr info))))
                  now)
@@ -290,19 +289,17 @@
                   (ip-address=? (message-yiaddr msg) (lease-info-client-addr info)))
          (maybe-ack-to-bound incoming-event last-request-time))]
 
-      ;; Ignore any other messages - now using the calculated next_request_time
+      ;; Ignore any other messages - use time-for-next-request for consistent scheduling
       [other (log-postal-debug "renewing-state-new: Ignoring event ~a" other)
-             (loop (yield next-request-time null) last-request-time)])))
+             (loop (yield time-for-next-request null) last-request-time)])))
 
 (define (to-rebinding-state info request-instant)
   (define request-xid (next-xid!))
-  ;; Calculate request interval
-  (define interval (calculate-request-interval
-                    request-instant
-                    (+ request-instant (* 10 60 1000)))) ;; Use 10 minutes as fallback
 
   ;; Calculate when the next request should be sent
-  (define next-request-time (+ request-instant interval))
+  (define next-request-time (calculate-request-timeout-instant
+                             request-instant
+                             (+ request-instant (* 10 60 1000)))) ;; Use 10 minutes as fallback
 
   (define next-evt (yield next-request-time (list (send-msg (request-from-lease info request-xid) 'broadcast))))
   (log-postal-debug "next-evt when transitioning to rebinding state ~a" next-evt)
@@ -319,13 +316,14 @@
                   [_ request-instant]))  ;; Fallback, though this shouldn't happen
 
     ;; Calculate when the next request should be sent based on the last request time
-    (define time-for-next-request (+ last-request-time
-                                     (calculate-request-interval last-request-time
-                                                                 (+ request-instant (* 10 60 1000)))))
+    (define time-for-next-request (calculate-request-timeout-instant
+                                   last-request-time
+                                   (+ request-instant (* 10 60 1000))))
 
-    ;; Calculate next interval for future scheduling
-    (define next-interval (calculate-request-interval now (+ request-instant (* 10 60 1000))))
-    (define next-request-time (+ now next-interval))
+    ;; Calculate next timeout for future scheduling
+    (define next-request-time (calculate-request-timeout-instant
+                               now
+                               (+ request-instant (* 10 60 1000))))
 
     (match incoming-event
       ;; If we exceed the lease time (estimated), unbind and go back to init
@@ -410,7 +408,7 @@
 
   (define (make-incoming now msg [sender canonical-server-ip])
     (incoming now sender msg))
-  #|
+
   (test-case
    "Starting in init leads to a request to send DHCPDISCOVER"
    (define s (make-state-machine))
@@ -614,12 +612,11 @@
   (test-case
    "When in renewing, if enough time has elapsed, rebinding is triggered"
    (define s (make-state-machine #:xid 42
-                                 #:start-state (renewing-state
+                                 #:start-state (renewing-state-new
                                                 (lease-info (make-ip-address "192.168.11.12")
                                                             (make-ip-address "192.168.11.1"))
                                                 (lease-instants #f #f 3000)
-                                                1000
-                                                42)))
+                                                1000)))
    (define-values (_ outgoing-events) (s (time-event 3200)))
    (check-match outgoing-events
                 (list (send-msg (struct* message ([type 'request])) 'broadcast))))
@@ -627,12 +624,11 @@
   (test-case
    "When in renewing, renewal is re-attempted periodically"
    (define s (make-state-machine #:xid 42
-                                 #:start-state (renewing-state
+                                 #:start-state (renewing-state-new
                                                 (lease-info (make-ip-address "192.168.11.12")
                                                             (make-ip-address "192.168.11.1"))
                                                 (lease-instants #f #f 3000)
-                                                1000
-                                                42)))
+                                                1000)))
    ; First attempt already sent on state entry
    ; Check that after half the remaining time (1000ms), another attempt is made
    (define-values (wakeup-at outgoing-events)
@@ -645,7 +641,7 @@
      (s (time-event (+ wakeup-at 60000))))
    (check-match next-events
                 (list (send-msg (struct* message ([type 'request])) (== canonical-server-ip)))))
-|#
+
   (test-case
    "When in renewing, unexpected packets are ignored"
    (define s (make-state-machine #:xid 42
@@ -666,7 +662,7 @@
                                 (number->ipv4-address 0)
                                 (list (message-option 'server-identifier canonical-server-ip))))))
    (check-equal? events1 null)
-   #|
+
    ; Send a discover - should be ignored
    (define-values (wakeup2 events2)
      (s (make-incoming 1600 canonical-server-ip
@@ -694,7 +690,7 @@
                                       (message-option 'rebinding-time k-test-rebinding-time)
                                       (message-option 'lease-time k-test-lease-time)
                                       (message-option 'server-identifier canonical-server-ip))))))
-   (check-equal? events3 null)|#
+   (check-equal? events3 null)
    5)
   #|
   (test-case
