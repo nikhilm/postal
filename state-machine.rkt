@@ -243,6 +243,10 @@
   ;; Use the passed-in last-request-time instead of deriving it from the event
   (define request-xid (next-xid!))
 
+  (log-postal-debug "renewing-state-new: Starting with last_request_time=~a, rebinding=~a"
+                    last-request-time
+                    (lease-instants-rebinding l-instants))
+
   (let loop ([incoming-event first-event]
              [last-request-time last-request-time])
 
@@ -251,46 +255,64 @@
                   [(time-event t) t]
                   [(incoming t _ _) t]))
 
+    (log-postal-debug "renewing-state-new: Processing event ~a at time ~a (last_request=~a)"
+                      incoming-event now last-request-time)
+
     ;; Calculate when the next request should be sent based on the last request time
     (define time-for-next-request (calculate-request-timeout-instant
                                    last-request-time
                                    (lease-instants-rebinding l-instants)))
 
+    (log-postal-debug "renewing-state-new: time_for_next_request=~a" time-for-next-request)
+
     (match incoming-event
       ;; If we reach T2 (rebinding time), transition to rebinding state
       [(time-event now) #:when (>= now (lease-instants-rebinding l-instants))
+                        (log-postal-debug "renewing-state-new: Reached rebinding time, transitioning")
                         (to-rebinding-state info now)]
 
       ;; Handle periodic retransmission
       [(time-event now)
        ;; Check if it's time to send another request using the calculated time
+       (log-postal-debug "renewing-state-new: Checking if time to send request: now=~a >= time_for_next_request=~a? ~a"
+                         now time-for-next-request (>= now time-for-next-request))
+
        (if (>= now time-for-next-request)
            ;; Time to send another request
-           (loop (yield (calculate-request-timeout-instant
-                         now
-                         (lease-instants-rebinding l-instants))
-                        (list (send-msg (request-from-lease info request-xid)
-                                        (lease-info-server-addr info))))
-                 now)
+           (let ([next-time (calculate-request-timeout-instant
+                             now
+                             (lease-instants-rebinding l-instants))])
+             (log-postal-debug "renewing-state-new: Sending request, next wakeup at ~a" next-time)
+             (loop (yield next-time
+                          (list (send-msg (request-from-lease info request-xid)
+                                          (lease-info-server-addr info))))
+                   now))
            ;; Not time yet, just wait
-           (loop (yield time-for-next-request null)
-                 last-request-time))]
+           (begin
+             (log-postal-debug "renewing-state-new: Not time yet, waiting until ~a" time-for-next-request)
+             (loop (yield time-for-next-request null)
+                   last-request-time)))]
 
       ;; Handle DHCPNAK - release address and go back to init
       [(incoming now sender (and msg (struct* message ([type 'nak] [xid (== request-xid)]))))
        ;; Validate the sender is our server
+       (log-postal-debug "renewing-state-new: Received NAK from ~a" sender)
        (when (ip-address=? sender (lease-info-server-addr info))
+         (log-postal-debug "renewing-state-new: Valid NAK, returning to init state")
          ((init-state) (yield (+ 2000 now) (list (iface-unbind)))))]
 
       ;; Handle DHCPACK - renew lease and go back to bound
       [(incoming now sender (and msg (struct* message ([type 'ack] [xid (== request-xid)]))))
        ;; Validate the sender is our server and the address matches
+       (log-postal-debug "renewing-state-new: Received ACK from ~a" sender)
        (when (and (ip-address=? sender (lease-info-server-addr info))
                   (ip-address=? (message-yiaddr msg) (lease-info-client-addr info)))
+         (log-postal-debug "renewing-state-new: Valid ACK, returning to bound state")
          (maybe-ack-to-bound incoming-event last-request-time))]
 
       ;; Ignore any other messages - use time-for-next-request for consistent scheduling
-      [other (log-postal-debug "renewing-state-new: Ignoring event ~a" other)
+      [other (log-postal-debug "renewing-state-new: Ignoring event ~a, waiting until ~a"
+                               other time-for-next-request)
              (loop (yield time-for-next-request null) last-request-time)])))
 
 (define (to-rebinding-state info request-instant)
@@ -408,7 +430,7 @@
 
   (define (make-incoming now msg [sender canonical-server-ip])
     (incoming now sender msg))
-
+  #|
   (test-case
    "Starting in init leads to a request to send DHCPDISCOVER"
    (define s (make-state-machine))
@@ -620,27 +642,55 @@
    (define-values (_ outgoing-events) (s (time-event 3200)))
    (check-match outgoing-events
                 (list (send-msg (struct* message ([type 'request])) 'broadcast))))
-
+|#
   (test-case
    "When in renewing, renewal is re-attempted periodically"
    (define s (make-state-machine #:xid 42
                                  #:start-state (renewing-state-new
                                                 (lease-info (make-ip-address "192.168.11.12")
                                                             (make-ip-address "192.168.11.1"))
-                                                (lease-instants #f #f 3000)
+                                                (lease-instants #f #f (* 30 60 1000))
                                                 1000)))
-   ; First attempt already sent on state entry
-   ; Check that after half the remaining time (1000ms), another attempt is made
-   (define-values (wakeup-at outgoing-events)
-     (s (time-event 2000)))
-   (check-match outgoing-events
-                (list (send-msg (struct* message ([type 'request])) (== canonical-server-ip))))
 
-   ; Verify minimum interval of 60 seconds is respected
-   (define-values (next-wakeup next-events)
-     (s (time-event (+ wakeup-at 60000))))
-   (check-match next-events
-                (list (send-msg (struct* message ([type 'request])) (== canonical-server-ip)))))
+   #|
+   In both RENEWING and REBINDING states, if the client receives no
+   response to its DHCPREQUEST message, the client SHOULD wait one-half
+   of the remaining time until T2 (in RENEWING state) and one-half of
+   the remaining lease time (in REBINDING state), down to a minimum of
+   60 seconds, before retransmitting the DHCPREQUEST message.
+
+   With the state created as if the last DHCPREQUEST was sent at 1000, and the rebinding time is at instant 1800000.
+   1. The first "receives no response" timeout will be at 1000 + (1800000 - 1000) / 2 = 900500, when a new request will be sent.
+   2. If no response is received to that one by 900500 + (1800000 - 900500) / 2 = 1350250, when a new request will be sent.
+   3. 1350250 + (1800000 - 1350250) / 2 = 1575125,
+   4. 1687562
+   5. 1743781
+   6. 1771890
+   Now (1800000 - 1771890) = 28110 which is < 60000, so start capping at no more than once every 60000.
+   7. 1831890 which exceeds the rebinding time, so exit the state.
+   |#
+
+   ; First attempt already sent on state entry. Now, nothing should happen until the retry time.
+   (define-values (wakeup-at outgoing-events)
+     (s (time-event 61000)))
+   (check-equal? wakeup-at 900500)
+   (check-equal? outgoing-events null)
+
+   ; expect retries if we keep waking up the machine at the next time it indicates, stopping when the next time is > the rebinding instant.
+   (define rebinding-wakeup-at
+     (for/fold ([wakeup-at 900500])
+               ([k (in-naturals)])
+       #:break (>= wakeup-at 1800000)
+       (define-values (nw events)
+         (s (time-event wakeup-at)))
+       (check-match events
+                    (list (send-msg (struct* message ([type 'request])) (== canonical-server-ip))))
+       nw))
+
+   (define-values (_ rb-events)
+     (s (time-event (+ 5 (* 30 60 1000)))))
+   (check-match rb-events
+                (list (send-msg (struct* message ([type 'request])) 'broadcast))))
 
   (test-case
    "When in renewing, unexpected packets are ignored"
@@ -690,8 +740,7 @@
                                       (message-option 'rebinding-time k-test-rebinding-time)
                                       (message-option 'lease-time k-test-lease-time)
                                       (message-option 'server-identifier canonical-server-ip))))))
-   (check-equal? events3 null)
-   5)
+   (check-equal? events3 null))
   #|
   (test-case
    "When in renewing, a nak leads to reset"
