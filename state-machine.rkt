@@ -430,7 +430,7 @@
 
   (define (make-incoming now msg [sender canonical-server-ip])
     (incoming now sender msg))
-  #|
+
   (test-case
    "Starting in init leads to a request to send DHCPDISCOVER"
    (define s (make-state-machine))
@@ -642,7 +642,7 @@
    (define-values (_ outgoing-events) (s (time-event 3200)))
    (check-match outgoing-events
                 (list (send-msg (struct* message ([type 'request])) 'broadcast))))
-|#
+
   (test-case
    "When in renewing, renewal is re-attempted periodically"
    (define s (make-state-machine #:xid 42
@@ -741,16 +741,15 @@
                                       (message-option 'lease-time k-test-lease-time)
                                       (message-option 'server-identifier canonical-server-ip))))))
    (check-equal? events3 null))
-  #|
+
   (test-case
    "When in renewing, a nak leads to reset"
    (define s (make-state-machine #:xid 42
-                                 #:start-state (renewing-state
+                                 #:start-state (renewing-state-new
                                                 (lease-info (make-ip-address "192.168.11.12")
                                                             (make-ip-address "192.168.11.1"))
-                                                3000
-                                                1000
-                                                42)))
+                                                (lease-instants #f #f 3000)
+                                                1000)))
    (define-values (_ outgoing-events) (s (incoming 2000 canonical-server-ip
                                                    (message
                                                     'nak
@@ -766,12 +765,11 @@
   (test-case
    "When in renewing, an ack moves back to bound"
    (define s (make-state-machine #:xid 42
-                                 #:start-state (renewing-state
+                                 #:start-state (renewing-state-new
                                                 (lease-info (make-ip-address "192.168.11.12")
                                                             (make-ip-address "192.168.11.1"))
-                                                3000
-                                                1000
-                                                42)))
+                                                (lease-instants #f #f 3000)
+                                                1000)))
 
    (define-values (_ outgoing-events) (s (incoming 2000 canonical-server-ip
                                                    (message
@@ -792,7 +790,7 @@
                   (lease-info
                    (== (make-ip-address "192.168.11.12"))
                    (== (make-ip-address "192.168.11.1")))))))
-
+  #|
   (test-case
    "When in rebinding, rebinding is re-attempted periodically"
    (define s (make-state-machine #:xid 42
@@ -813,7 +811,7 @@
      (s (time-event (+ wakeup-at 60000))))
    (check-match next-events
                 (list (send-msg (struct* message ([type 'request])) 'broadcast))))
-
+|#
   (test-case
    "When in rebinding, unexpected packets are ignored"
    (define s (make-state-machine #:xid 42
@@ -918,4 +916,4 @@
      (fail "TODO"))
 
   #;(test-case
-     "Ensure all states handle an eventual timeout") |#)
+     "Ensure all states handle an eventual timeout"))
