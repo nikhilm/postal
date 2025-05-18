@@ -33,25 +33,25 @@
   [((message-option (or 54 'server-identifier) value)) (write-addr-option 54 value)])
 
 (struct message
-  (type ; symbol
-   xid ; int
-   secs ; int
-   ciaddr ; ip-address?
-   yiaddr ; ip-address?
-   siaddr ; ip-address?
-   giaddr ; ip-address?
-   options ; list
-   ) #:transparent)
+        (type ; symbol
+         xid ; int
+         secs ; int
+         ciaddr ; ip-address?
+         yiaddr ; ip-address?
+         siaddr ; ip-address?
+         giaddr ; ip-address?
+         options ; list
+         )
+  #:transparent)
 
 (struct exn:fail:parse-message exn:fail ())
 
 (define interface-mac-addr
-  (make-parameter
-   #f
-   (lambda (v)
-     (unless (equal? (bytes-length v) 16)
-       (error "Must be a 16-byte byte string"))
-     v)))
+  (make-parameter #f
+                  (lambda (v)
+                    (unless (equal? (bytes-length v) 16)
+                      (error "Must be a 16-byte byte string"))
+                    v)))
 
 ; Convert a string mac addr of the form "xx:xx:xx:xx:xx:xx" to a reasonable byte string to be used with interface-mac-addr
 (define (make-mac-addr in)
@@ -91,65 +91,64 @@
 
 (define/contract (encode msg)
   (message? . -> . bytes?)
-  (with-output-to-bytes
-    (lambda ()
-      ; bootp op
-      ; BOOTREQUEST
-      (write-byte 1)
-      ; htype - 10mb ethernet. i see no reason to use another.
-      (write-byte 1)
+  (with-output-to-bytes (lambda ()
+                          ; bootp op
+                          ; BOOTREQUEST
+                          (write-byte 1)
+                          ; htype - 10mb ethernet. i see no reason to use another.
+                          (write-byte 1)
 
-      ; hlen
-      (write-byte 6)
+                          ; hlen
+                          (write-byte 6)
 
-      ; hops - client sets to zero
-      (write-byte 0)
+                          ; hops - client sets to zero
+                          (write-byte 0)
 
-      ; xid
-      (write-integer (message-xid msg) 4 #f)
+                          ; xid
+                          (write-integer (message-xid msg) 4 #f)
 
-      ; secs
-      (write-integer 0 2 #f)
+                          ; secs
+                          (write-integer 0 2 #f)
 
-      ; flags should set the most significant bit to 1 to request broadcast.
-      (write-integer #x8000 2 #f)
+                          ; flags should set the most significant bit to 1 to request broadcast.
+                          (write-integer #x8000 2 #f)
 
-      ; ciaddr
-      (write-int-addr (ip-address->number (message-ciaddr msg)))
+                          ; ciaddr
+                          (write-int-addr (ip-address->number (message-ciaddr msg)))
 
-      ; yiaddr
-      (write-int-addr (ip-address->number (message-yiaddr msg)))
+                          ; yiaddr
+                          (write-int-addr (ip-address->number (message-yiaddr msg)))
 
-      ; siaddr
-      (write-int-addr (ip-address->number (message-siaddr msg)))
+                          ; siaddr
+                          (write-int-addr (ip-address->number (message-siaddr msg)))
 
-      ; giaddr
-      (write-int-addr (ip-address->number (message-giaddr msg)))
+                          ; giaddr
+                          (write-int-addr (ip-address->number (message-giaddr msg)))
 
-      ; chaddr
-      (let ([mac (interface-mac-addr)])
-        (unless mac
-          (error "parameter interface-mac-addr is not set!"))
-        (write-bytes mac))
+                          ; chaddr
+                          (let ([mac (interface-mac-addr)])
+                            (unless mac
+                              (error "parameter interface-mac-addr is not set!"))
+                            (write-bytes mac))
 
-      ; sname
-      (write-bytes (make-bytes 64))
+                          ; sname
+                          (write-bytes (make-bytes 64))
 
-      ; file
-      (write-bytes (make-bytes 128))
+                          ; file
+                          (write-bytes (make-bytes 128))
 
-      ; options
-      ;; The first four octets of the 'options' field of the DHCP message
-      ;; contain the (decimal) values 99, 130, 83 and 99, respectively (this
-      ;; is the same magic cookie as is defined in RFC 1497 [17]
-      (write-bytes (bytes 99 130 83 99))
+                          ; options
+                          ;; The first four octets of the 'options' field of the DHCP message
+                          ;; contain the (decimal) values 99, 130, 83 and 99, respectively (this
+                          ;; is the same magic cookie as is defined in RFC 1497 [17]
+                          (write-bytes (bytes 99 130 83 99))
 
-      ; dhcp message type
-      (write-bytes (bytes 53 1 (dhcp-type->int (message-type msg))))
+                          ; dhcp message type
+                          (write-bytes (bytes 53 1 (dhcp-type->int (message-type msg))))
 
-      (for ([option (in-list (message-options msg))])
-        (write-option option))
-      (write-bytes (bytes 255)))))
+                          (for ([option (in-list (message-options msg))])
+                            (write-option option))
+                          (write-bytes (bytes 255)))))
 
 (define (read-len-prefixed-time)
   (unless (eq? 4 (read-byte))
@@ -183,17 +182,16 @@
     [59 (values 'rebinding-time (read-len-prefixed-time))]
     ; TODO: Handle receiving less than n bytes.
     ; seems like that should be an error.
-    [tag (let ([n (read-byte)])
-           (values tag (read-bytes n)))]))
+    [tag (let ([n (read-byte)]) (values tag (read-bytes n)))]))
 
 (define (parse-current-input)
   ; generic handler in case a sub-parser did not raise a more specific error.
   (with-handlers ([exn:fail?
                    (lambda (e)
-                     (raise
-                      (exn:fail:parse-message
-                       (format "parse: Failed to parse message. Original exception: ~a" (exn-message e))
-                       (current-continuation-marks))))])
+                     (raise (exn:fail:parse-message
+                             (format "parse: Failed to parse message. Original exception: ~a"
+                                     (exn-message e))
+                             (current-continuation-marks))))])
     ; bootp message type to discard
     ; TODO: Fail all reads if they return eof.
     (read-byte)
@@ -235,13 +233,18 @@
     ; TODO: Is it valid for a message to have data beyond the last option?
     (if msg-type
         (message (int->dhcp-type (bytes->integer msg-type #f))
-                 xid secs ciaddr yiaddr siaddr giaddr options)
+                 xid
+                 secs
+                 ciaddr
+                 yiaddr
+                 siaddr
+                 giaddr
+                 options)
         (error 'parse "No dhcp message type found"))))
 
 (define/contract (parse buf)
   (bytes? . -> . message?)
   (with-input-from-bytes buf parse-current-input))
-
 
 ; findf for message options
 ; returns the value or #f

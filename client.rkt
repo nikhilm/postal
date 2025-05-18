@@ -41,11 +41,12 @@ Dropped incoming message, since it was malformed.
   sender: ~a
   parse error: ~a
 EOF
-                      (bytes-length data) src (exn-message e)))
+                      (bytes-length data)
+                      src
+                      (exn-message e)))
 
 (define (parse-and-send-dgram data src ch)
-  (with-handlers ([exn:fail:parse-message?
-                   (lambda (e) (parse-failure-handler data src e))])
+  (with-handlers ([exn:fail:parse-message? (lambda (e) (parse-failure-handler data src e))])
     (define msg (parse data))
     (log-postal-debug "Incoming message: ~a from ~v" (pretty-format msg) src)
     (channel-put ch (incoming (current-inexact-monotonic-milliseconds) src msg))))
@@ -56,17 +57,17 @@ EOF
   ; from this thread fast enough that we aren't dropping
   ; udp messages due to full kernel buffers.
   ; TODO: a way to shut this thread down.
-  (thread
-   (lambda ()
-     (define resp (make-bytes 65536))
-     (let loop ()
-       (define-values (n src _) (udp-receive! sock resp))
-       (parse-and-send-dgram (subbytes resp 0 n) (make-ip-address src) ch)
-       (loop)))))
+  (thread (lambda ()
+            (define resp (make-bytes 65536))
+            (let loop ()
+              (define-values (n src _) (udp-receive! sock resp))
+              (parse-and-send-dgram (subbytes resp 0 n) (make-ip-address src) ch)
+              (loop)))))
 
 ; this struct does not have any state right now, but will likely need config options and stuff eventually.
 (struct dhcp-client (mac-addr))
-(define (make-dhcp-client mac-addr) (dhcp-client mac-addr))
+(define (make-dhcp-client mac-addr)
+  (dhcp-client mac-addr))
 
 ; TODO
 #|the DHCPREQUEST message MUST use the same
@@ -110,26 +111,21 @@ EOF
         ; reconcile system state if required.
         (loop sm (alarm-evt next-wakeup-instant #t) (append packets-to-send outgoing)))
 
-      (sync
-       (handle-evt alarm (thunk* (spin #f)))
-       (handle-evt ch spin)
-       (if (null? packets-to-send)
-           never-evt
-           ; this is basically saying: when the socket is ready to receive data
-           ; grab the first outgoing packet, and replace the event with an attempt
-           ; to send that packet. then continue the loop.
-           ; waiting on readiness allows delaying unpacking the first outgoing packet.
-           (replace-evt (udp-send-ready-evt sock)
-                        (thunk*
-                         (match-let ([(send-msg msg to) (first packets-to-send)])
-                           (handle-evt (udp-send-to-evt sock
-                                                        (pick-recepient to)
-                                                        67
-                                                        (encode msg))
+      (sync (handle-evt alarm (thunk* (spin #f)))
+            (handle-evt ch spin)
+            (if (null? packets-to-send)
+                never-evt
+                ; this is basically saying: when the socket is ready to receive data
+                ; grab the first outgoing packet, and replace the event with an attempt
+                ; to send that packet. then continue the loop.
+                ; waiting on readiness allows delaying unpacking the first outgoing packet.
+                (replace-evt
+                 (udp-send-ready-evt sock)
+                 (thunk* (match-let ([(send-msg msg to) (first packets-to-send)])
+                           (handle-evt (udp-send-to-evt sock (pick-recepient to) 67 (encode msg))
                                        (lambda (e)
                                          (log-postal-debug "Sent ~v to ~v" msg to)
                                          (loop sm alarm (rest packets-to-send))))))))))))
-
 
 (define/match (pick-recepient addr)
   [(broadcast) "255.255.255.255"]
@@ -166,23 +162,20 @@ OK, few things to sort out with the design
 
 (module+ test
   (require rackunit)
-  (test-case
-   "Malformed incoming messages are discarded"
-   (define correct
-     (parameterize ([interface-mac-addr (make-mac-addr "00:11:22:33:44:55")])
-       (encode (message 'discover
-                        17
-                        0
-                        (number->ipv4-address 0)
-                        (number->ipv4-address 0)
-                        (number->ipv4-address 0)
-                        (number->ipv4-address 0)
-                        null))))
-   (define malformed (subbytes correct 5))
-   (define ch (make-channel))
-   (thread
-    (lambda ()
-      (parse-and-send-dgram malformed #f ch)))
-   (sync (handle-evt ch
-                     (lambda (_) (fail "Channel should not be ready, since message is discarded")))
-         (system-idle-evt))))
+  (test-case "Malformed incoming messages are discarded"
+    (define correct
+      (parameterize ([interface-mac-addr (make-mac-addr "00:11:22:33:44:55")])
+        (encode (message 'discover
+                         17
+                         0
+                         (number->ipv4-address 0)
+                         (number->ipv4-address 0)
+                         (number->ipv4-address 0)
+                         (number->ipv4-address 0)
+                         null))))
+    (define malformed (subbytes correct 5))
+    (define ch (make-channel))
+    (thread (lambda () (parse-and-send-dgram malformed #f ch)))
+    (sync (handle-evt ch
+                      (lambda (_) (fail "Channel should not be ready, since message is discarded")))
+          (system-idle-evt))))
