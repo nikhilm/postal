@@ -4,6 +4,16 @@
 (require racket/match)
 (require "logger.rkt")
 
+;; Thinking about the retries a bit more, there are 2 policies
+;; 1. sorta exponential backoff, which is what is implemented below.
+;; 2. working backwards from a specific instant, where the next deadline is half of now to the instant, but with a minimum bound.
+;; i think we could encode this as another policy here, so that renew/rebind don't need all that logic in their body.
+;;
+;; the caller also has to make two decisions right now:
+;; 1. does "now" exceed the current try's deadline?
+;; 2. was this the last try?
+;; this also applies to both policies.
+
 ; Create a retry policy with max attempts, base timeout (ms), and jitter range (ms)
 (provide (struct-out retry-policy)
 
