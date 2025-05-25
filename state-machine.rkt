@@ -333,8 +333,7 @@
        #:when (>= now time-for-next-request)
 
        ;; Time to send another request
-       (let ([next-time (calculate-request-timeout-instant now
-                                                           (lease-instants-rebinding l-instants))])
+       (let ([next-time (calculate-request-timeout-instant now (lease-instants-expiry l-instants))])
          (loop (yield next-time (list (send-msg (request-from-lease info request-xid) 'broadcast)))
                now))]
       ;; Not time yet, just wait
@@ -779,13 +778,25 @@
                                            (lease-instants (* 35 60 1000) #f (* 30 60 1000))
                                            1000)))
     ; First attempt already sent on state entry
-    ; Check that after half the remaining time (500ms), another attempt is made
-    (define-values (wakeup-at outgoing-events) (s (time-event 1500)))
-    (check-match outgoing-events (list (send-msg (struct* message ([type 'request])) 'broadcast)))
+    (define wakeup-times
+      (for/fold ([wakeup-times '()]
+                 [last-instant (* 30 60 1000)]
+                 #:result wakeup-times)
+                ([_ (in-naturals)]
+                 #:break (>= last-instant (* 35 60 1000)))
+        (define-values (next-wakeup events) (s (time-event last-instant)))
+        (check-match events (list (send-msg (struct* message ([type 'request])) 'broadcast)))
+        (values (append wakeup-times (list next-wakeup)) next-wakeup)))
 
-    ; Verify minimum interval of 60 seconds is respected
-    (define-values (next-wakeup next-events) (s (time-event (+ wakeup-at 60000))))
-    (check-match next-events (list (send-msg (struct* message ([type 'request])) 'broadcast))))
+    (foldl (lambda (it acc)
+             (check >= (- it acc) (* 60 1000))
+             it)
+           0
+           wakeup-times)
+
+    ; This should trigger unbinding since we didn't get any responses.
+    (define-values (_ events) (s (time-event (last wakeup-times))))
+    (check-match (first events) (iface-unbind)))
 
   (test-case "When in rebinding, unexpected packets are ignored"
     (define s
