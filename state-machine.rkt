@@ -801,10 +801,11 @@
   (test-case "When in rebinding, unexpected packets are ignored"
     (define s
       (make-state-machine #:xid 42
-                          #:start-state (rebinding-state (lease-info (make-ip-address "192.168.11.12")
-                                                                     (make-ip-address "192.168.11.1"))
-                                                         1000
-                                                         42)))
+                          #:start-state
+                          (rebinding-state (lease-info (make-ip-address "192.168.11.12")
+                                                       (make-ip-address "192.168.11.1"))
+                                           (lease-instants (* 35 60 1000) #f (* 30 60 1000))
+                                           1000)))
     ; Send an offer - should be ignored
     (define-values (wakeup1 events1)
       (s (make-incoming 1100
@@ -853,10 +854,11 @@
   (test-case "When in rebinding, a nak leads to reset"
     (define s
       (make-state-machine #:xid 42
-                          #:start-state (rebinding-state (lease-info (make-ip-address "192.168.11.12")
-                                                                     (make-ip-address "192.168.11.1"))
-                                                         1000
-                                                         42)))
+                          #:start-state
+                          (rebinding-state (lease-info (make-ip-address "192.168.11.12")
+                                                       (make-ip-address "192.168.11.1"))
+                                           (lease-instants (* 35 60 1000) #f (* 30 60 1000))
+                                           1000)))
     (define-values (_ outgoing-events)
       (s (incoming 1100
                    canonical-server-ip
@@ -873,10 +875,11 @@
   (test-case "When in rebinding, an ack moves back to bound"
     (define s
       (make-state-machine #:xid 42
-                          #:start-state (rebinding-state (lease-info (make-ip-address "192.168.11.12")
-                                                                     (make-ip-address "192.168.11.1"))
-                                                         1000
-                                                         42)))
+                          #:start-state
+                          (rebinding-state (lease-info (make-ip-address "192.168.11.12")
+                                                       (make-ip-address "192.168.11.1"))
+                                           (lease-instants (* 35 60 1000) #f (* 30 60 1000))
+                                           1000)))
 
     (define-values (_ outgoing-events)
       (s (incoming 1100
